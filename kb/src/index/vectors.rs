@@ -78,12 +78,12 @@ pub fn build_vectors(conn: &Connection, cfg: &Config, provider: Option<&dyn Prov
 
     let mut embedded = 0usize;
     for batch in pending.chunks(EMBED_BATCH_SIZE) {
-        let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
-        let vecs = provider.embed(&texts).context("embed request failed")?;
-        if vecs.len() != texts.len() {
-            bail!("embed provider returned {} vectors for {} inputs", vecs.len(), texts.len());
-        }
+        // a chunk longer than the model's context is cut; a batch the provider rejects is retried
+        // one text at a time with a shorter cut, and a text that still fails is skipped (logged).
+        let texts: Vec<String> = batch.iter().map(|(_, t)| truncate_for_embedding(t, EMBED_MAX_CHARS)).collect();
+        let vecs = embed_resilient(provider, &texts)?;
         for ((chunk_id, _), vec) in batch.iter().zip(vecs.into_iter()) {
+            let Some(vec) = vec else { continue };
             let chunk_hash = rows.iter().find(|(id, ..)| id == chunk_id).map(|(_, h, ..)| h.as_str()).unwrap_or_default();
             put_cached_embedding(conn, chunk_hash, &model, &vec)?;
             embeddings.push((*chunk_id, vec));
@@ -248,6 +248,39 @@ pub fn cosine_nearest(vectors: &[(i64, Vec<f32>)], query: &[f32], k: usize) -> V
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(k);
     scored
+}
+
+
+/// upper bound on characters sent per text; small embedding models reject inputs past their
+/// context window (nomic-embed-text: 2,048 tokens), and section text past this point adds little.
+pub const EMBED_MAX_CHARS: usize = 6_000;
+
+fn truncate_for_embedding(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars { text.to_string() } else { text.chars().take(max_chars).collect() }
+}
+
+/// embed a batch; on a provider error fall back to one text at a time with a tighter cut, and
+/// return `None` for a text that still fails so the build continues without that vector.
+fn embed_resilient(provider: &dyn Provider, texts: &[String]) -> Result<Vec<Option<Vec<f32>>>> {
+    match provider.embed(texts) {
+        Ok(vecs) if vecs.len() == texts.len() => Ok(vecs.into_iter().map(Some).collect()),
+        Ok(vecs) => bail!("embed provider returned {} vectors for {} inputs", vecs.len(), texts.len()),
+        Err(batch_err) => {
+            let mut out = Vec::with_capacity(texts.len());
+            for t in texts {
+                let short = truncate_for_embedding(t, EMBED_MAX_CHARS / 3);
+                match provider.embed(std::slice::from_ref(&short)) {
+                    Ok(mut v) if v.len() == 1 => out.push(v.pop()),
+                    Ok(_) => out.push(None),
+                    Err(e) => {
+                        eprintln!("embed: skipping one chunk after batch error ({batch_err}) and retry error ({e})");
+                        out.push(None);
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
 }
 
 #[cfg(test)]

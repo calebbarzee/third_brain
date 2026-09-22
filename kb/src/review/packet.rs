@@ -102,6 +102,17 @@ pub struct ReviewPacket {
     pub context_excerpts: Vec<String>,
     pub session_facts: Option<SessionFacts>,
     pub documents: Vec<DocChange>,
+    /// changed paths outside docs/ (prompts, config, files moved out of docs/): status letter and a
+    /// short diff, so the reviewer sees the whole change and not only the documents.
+    #[serde(default)]
+    pub other_changes: Vec<OtherChange>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OtherChange {
+    pub path: String,
+    pub status: String,
+    pub diff: String,
 }
 
 const DIFF_MAX_CHARS: usize = 12_000;
@@ -127,9 +138,12 @@ pub fn gather(cfg: &Config, input: &ReviewInput) -> Result<ReviewPacket> {
     let conn = index::open_newest(cfg).ok();
 
     let mut documents = Vec::new();
+    let mut other_changes = Vec::new();
     for (status, old_path, new_path) in rows {
         let path = if new_path.is_empty() { old_path.clone() } else { new_path.clone() };
         if !path.starts_with("docs/") || !path.ends_with(".md") {
+            let diff = truncate_chars(&git::diff_range_path(repo, &input.base, &input.head, &path).unwrap_or_default(), 2_000);
+            other_changes.push(OtherChange { path: path.clone(), status: status.to_string(), diff });
             continue;
         }
 
@@ -176,6 +190,7 @@ pub fn gather(cfg: &Config, input: &ReviewInput) -> Result<ReviewPacket> {
         context_excerpts,
         session_facts: input.session_facts.clone(),
         documents,
+        other_changes,
     };
 
     let whole_max_chars = (cfg.manifest.packet.review_context_tokens as usize) * 4;
@@ -428,6 +443,12 @@ pub fn render(packet: &ReviewPacket) -> String {
         }
         if let Some(note) = &doc.diff_head_main_note {
             out.push_str(&format!("# {note}\n"));
+        }
+    }
+    if !packet.other_changes.is_empty() {
+        out.push_str("\n# changes outside docs/: config, prompts, or files moved out of the document tree\n");
+        for c in &packet.other_changes {
+            out.push_str(&format!("\n[[other_change]]\npath = \"{}\"\nstatus = \"{}\"\ndiff = \"\"\"\n{}\n\"\"\"\n", c.path, c.status, c.diff));
         }
     }
     out
