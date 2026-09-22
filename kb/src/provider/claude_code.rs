@@ -64,6 +64,10 @@ pub fn build_args(model: Option<&str>, system: Option<&str>) -> Vec<String> {
         "--tools".to_string(),
         String::new(),
         "--strict-mcp-config".to_string(),
+        // no user or project settings: the owner's claude.md, output styles, and hooks must not
+        // color a provider call
+        "--setting-sources".to_string(),
+        String::new(),
     ];
     if let Some(m) = model {
         args.push("--model".to_string());
@@ -158,7 +162,7 @@ mod tests {
     #[test]
     fn build_args_omits_model_and_system_when_absent() {
         let args = build_args(None, None);
-        assert_eq!(args, vec!["-p", "--output-format", "json", "--tools", "", "--strict-mcp-config"]);
+        assert_eq!(args, vec!["-p", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--setting-sources", ""]);
     }
 
     #[test]

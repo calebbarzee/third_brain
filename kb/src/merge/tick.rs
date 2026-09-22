@@ -52,11 +52,17 @@ pub fn tick(cfg: &Config) -> Result<TickReport> {
 
     // remote session/* branches (here: local ones, since this subset has no server) merged into
     // main: close out their session file.
+    // a session counts as landed only when it was settled and its commits are reachable from
+    // main. a fresh open session sits at its base commit, which git also reports as "merged", so
+    // state and head-versus-base are checked before anything is removed.
     if let Ok(merged_branches) = git::branches_merged(&cfg.root, "main", "refs/heads/session/*") {
         for branch in merged_branches {
             if let Some(id) = branch.strip_prefix("session/")
                 && let Ok(mut s) = session::load(cfg, id)
-                && !matches!(s.state, SessionState::Merged | SessionState::Abandoned)
+                && matches!(s.state, SessionState::Settled | SessionState::Merging)
+                && let Ok(head) = git::rev_parse(&cfg.root, &branch)
+                && head != s.base_commit
+                && git::is_ancestor(&cfg.root, &head, "main")
             {
                 session::cleanup(cfg, &mut s, true)?;
                 report.cleaned_merged_sessions += 1;
