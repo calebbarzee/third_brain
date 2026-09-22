@@ -100,6 +100,10 @@ pub fn build_with_providers(
         return quick_report(&final_path, &commit);
     }
 
+    // one build per commit at a time: the tick, a post-merge hook, and a manual build can all
+    // fire for the same commit within seconds. the lock names the pid so a dead holder is cleared.
+    let _lock = BuildLock::acquire(&dir, &commit)?;
+    remove_stale_tmp(&dir);
     let tmp_path = dir.join(format!("{commit}.sqlite.tmp-{}", std::process::id()));
     if tmp_path.exists() {
         std::fs::remove_file(&tmp_path).ok();
@@ -190,6 +194,62 @@ pub fn open_newest(cfg: &Config) -> Result<Connection> {
     super::vectors::register_extension();
     let path = newest_artifact(cfg).context("no index artifact found; run `kb index build` first")?;
     Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).with_context(|| format!("opening {}", path.display()))
+}
+
+
+/// advisory per-commit build lock: a file holding the builder's pid, created exclusively.
+struct BuildLock {
+    path: std::path::PathBuf,
+}
+
+impl BuildLock {
+    fn acquire(dir: &Path, commit: &str) -> Result<BuildLock> {
+        let path = dir.join(format!("{commit}.lock"));
+        loop {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut f) => {
+                    use std::io::Write;
+                    let _ = write!(f, "{}", std::process::id());
+                    return Ok(BuildLock { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let holder = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u32>().ok());
+                    match holder {
+                        Some(pid) if pid_alive(pid) => bail!("an index build for {commit} is already running (pid {pid})"),
+                        _ => {
+                            // stale lock from a dead process
+                            std::fs::remove_file(&path).ok();
+                        }
+                    }
+                }
+                Err(e) => return Err(e).context("creating the index build lock"),
+            }
+        }
+    }
+}
+
+impl Drop for BuildLock {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+fn pid_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// delete `*.sqlite.tmp-<pid>` files whose pid is no longer alive (a killed or crashed build).
+fn remove_stale_tmp(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some((_, pid)) = name.rsplit_once(".tmp-")
+            && let Ok(pid) = pid.parse::<u32>()
+            && !pid_alive(pid)
+        {
+            std::fs::remove_file(e.path()).ok();
+        }
+    }
 }
 
 fn quick_report(path: &Path, commit: &str) -> Result<BuildReport> {
