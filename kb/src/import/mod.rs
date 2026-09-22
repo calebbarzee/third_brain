@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 /// directory names never descended into while collecting source files: kb's own state and
 /// tooling directories, plus `docs/` itself so pointing `kb import` at a kb repository's root
 /// does not re-import its own documents.
-const SKIP_DIR_NAMES: [&str; 4] = [".git", ".kb", ".obsidian", "docs"];
+const SKIP_DIR_NAMES: [&str; 8] = [".git", ".kb", ".obsidian", "docs", "prompts", "schemas", "eval", "redactions"];
 
 /// options for `import`, independent of clap (kept here so tests and other callers do not need
 /// to build a clap `ArgMatches`).
@@ -123,6 +123,13 @@ pub fn import(cfg: &Config, opts: &ImportOptions) -> Result<ImportReport> {
 
         let mut fm = outcome.document.frontmatter;
         let body = outcome.document.body;
+
+        // validate falls back to the filename stem for a title; the staging name is not the note's
+        // name, so a title equal to it becomes the original stem.
+        let staging_stem = staging_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+        if fm.title.as_deref() == Some(staging_stem.as_str()) {
+            fm.title = Some(original_stem.clone());
+        }
 
         if !fm.extra.contains_key("source_id") {
             fm.extra.insert("source_id".into(), toml::Value::String(file.rel.clone()));
