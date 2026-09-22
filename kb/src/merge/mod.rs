@@ -539,9 +539,16 @@ fn run_policy_checks(
             continue;
         }
         if let Err(reason) = check_delete_guard(cfg, repo, base, old_path, &deleted_paths) {
-            log.check("delete-guard", false, Some(&reason))?;
-            checks.push(CheckResult::fail("delete-guard", &reason));
-            return Ok(PolicyOutcome::Fail(format!("delete guard: {reason}")));
+            if actor_is_agent {
+                log.check("delete-guard", false, Some(&reason))?;
+                checks.push(CheckResult::fail("delete-guard", &reason));
+                return Ok(PolicyOutcome::Fail(format!("delete guard: {reason}")));
+            }
+            // humans are never blocked (design §10): the deletion is recorded and, since every
+            // deletion is review class in the structure gate, a human still approves it.
+            log.check("delete-guard", true, Some(&format!("human deletion, guard not met: {reason}")))?;
+            checks.push(CheckResult::ok("delete-guard", format!("human deletion; review class ({reason})")));
+            return Ok(PolicyOutcome::Ok);
         }
     }
     checks.push(CheckResult::ok("delete-guard", "ok"));

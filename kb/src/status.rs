@@ -178,7 +178,7 @@ fn backup_status(cfg: &Config) -> Vec<BackupStatus> {
     if !exists {
         return Vec::new();
     }
-    let query = "select kind, max(at) from backups group by kind order by kind";
+    let query = "select kind, max(ts) from backups group by kind order by kind";
     let Ok(mut stmt) = conn.prepare(query) else { return Vec::new() };
     let Ok(rows) = stmt.query_map([], |r| Ok(BackupStatus { kind: r.get(0)?, at: r.get(1)? })) else { return Vec::new() };
     rows.filter_map(|r| r.ok()).collect()
