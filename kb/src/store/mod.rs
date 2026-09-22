@@ -7,12 +7,15 @@
 //! - `normalize` bytes-to-text normalization per media type, versioned.
 //! - `sources`   adapters (`files`, `git`) that pull external content into captures.
 //! - `export`    `kb archive export`: normalized text or raw bytes to a file.
+//! - `usage`     `read`/`cite` events per document per day, aggregated into `graph_metrics` at
+//!   index build time (design.md §17.3, §17.4).
 
 pub mod blob;
 pub mod catalog;
 pub mod export;
 pub mod normalize;
 pub mod sources;
+pub mod usage;
 
 pub use blob::{BlobStore, open_store};
 pub use catalog::{Capture, PutCapture};

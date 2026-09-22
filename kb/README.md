@@ -45,9 +45,18 @@ drop markdown files into `docs/` and commit. the hook renames each to its ulid, 
 | `kb curate captures --all-new` or `--ids <id>...` | turn new captures into operations inside a session; with no `curate` provider the packet is printed for the calling agent (deferred prompt) |
 | `kb curate propose "<text>" --task "..." [--dry-run]` | curate a free-text proposal |
 | `kb curate apply --session <id> --ops-json <file>` | apply hand-written operations; how a deferred packet completes |
+| `kb answer ask "<question>"` | hybrid retrieval plus a cited answer from the `answer` provider; deferred passages when none is configured |
+| `kb answer eval [--compare fts,hybrid]`, `kb answer eval-seed` | retrieval quality against `eval/queries.toml` |
+| `kb import <dir> [--move] [--layer L]` | bring existing notes in through one session: frontmatter, ulids, link rewriting, source refs |
+| `kb serve [--no-auth]`, `kb mcp`, `kb token issue <principal>` | rest and mcp over http on 127.0.0.1:7777; mcp over stdio; bearer tokens |
+| `kb schedule install [--serve]`, `status`, `uninstall` | systemd user timers for tick, capture, eod, nightly, backup |
+| `kb maintain nightly [--dry-run]`, `findings`, `escalations`, `compact` | nightly curation, escalations, compaction after a checkpoint |
+| `kb backup run [--kind mirror|bundle|store-copy|all]`, `manifest`, `verify`, `restore-drill <dir>` | backups per `backup.toml` |
+| `kb status` | one screen of repository, sessions, index, captures, backups, scheduler |
 | `kb run list`, `show`, `verify`, `diff`, `search` | run logs |
 | `kb validate`, `kb secrets`, `kb search`, `kb get`, `kb show` | aliases for the `check` and `index` forms above |
 | `kb provider test <role>`, `kb provider classify <file> [--write]` | provider connectivity and manual classify |
+| `kb gate ask --labels <a,b,...> [--context "..."] <text>` | run the quick gate (role `gate`) by hand |
 
 ids accept a full ulid or a unique prefix. `--json` gives machine-readable output. `--repo <path>` points at a repository other than the current one.
 
@@ -56,13 +65,50 @@ ids accept a full ulid or a unique prefix. `--json` gives machine-readable outpu
 ```toml
 # kb.toml
 [providers.classify]
-kind = "ollama"            # anthropic | openai | ollama
+kind = "ollama"            # anthropic | openai | ollama | claude-code | command
 model = "llama3.2:3b"
 base_url = "http://localhost:11434"
 # api_key_env = "ANTHROPIC_API_KEY"   # name of the variable; never the key
+
+# runs the owner's locally installed `claude` cli in print mode, so requests ride whatever
+# subscription that login already has and need no api key. `model` is passed to `--model`
+# verbatim: an alias ("sonnet", "opus", "haiku") or a full model name both work; leave it empty
+# to take the cli's own default model. `base_url` is not used.
+[providers.gate]
+kind = "claude-code"
+model = "haiku"
+
+# runs an arbitrary local command, feeding it the flattened prompt on stdin and reading its
+# reply from stdout: a hand-rolled classifier plugs into any role without a dedicated adapter.
+# `base_url` holds the whole command line, split on whitespace (no quoting -- a path with a
+# space in it does not work). `model` and `api_key_env` are ignored.
+[providers.gate]
+kind = "command"
+base_url = "python3 /path/to/classifier.py"
 ```
 
-`KB_PROVIDER_TIMEOUT_SECS` (default 600) bounds a request. `KB_ANTHROPIC_THINKING_BUDGET` enables extended thinking on the anthropic adapter.
+`KB_PROVIDER_TIMEOUT_SECS` (default 600) bounds a request, including the `claude-code` and `command` adapters' child process (killed past the deadline). `KB_ANTHROPIC_THINKING_BUDGET` enables extended thinking on the anthropic adapter. `KB_CLAUDE_CODE_BIN` overrides the `claude` binary the `claude-code` adapter runs (default: `claude`, resolved on `PATH`).
+
+### the quick gate
+
+role `gate` is a cheap classifier, meant for a small local model or a short script rather than a
+full model call: `kb gate ask --labels <a,b,...> <text>` runs it by hand, and `kb merge` runs it
+automatically ahead of the full content review (design.md §15.2) for a human session the
+structure gate already classified `auto`. when `gate` answers `label = "trivial"` at or above
+`thresholds.review_confidence`, the full review is skipped and the merge proceeds on the quick
+gate's word alone; otherwise, or with no `gate` provider configured, or for an agent session,
+the full review runs exactly as it always has. every time the gate is actually asked, its answer
+is recorded as a `check` event in the run log, regardless of which way it came out.
+
+## use it from an agent
+
+register the stdio server in an mcp client (claude code, cursor, or any mcp client):
+
+```json
+{ "mcpServers": { "kb": { "command": "/path/to/kb", "args": ["--repo", "/path/to/your-kb", "mcp"] } } }
+```
+
+tools: `search`, `get`, `refs`, `propose`, `run`, `answer`. `propose` opens a session and applies validated operations; the agent then runs `kb merge <session>` or leaves it for `kb eod`.
 
 ## develop
 

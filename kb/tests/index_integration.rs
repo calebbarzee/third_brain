@@ -111,7 +111,7 @@ fn build_and_query_a_small_repo() {
     let conn = index::open_newest(&cfg).unwrap();
 
     // search finds a term present in both root and install.
-    let hits = index::search(&conn, "install", &index::SearchOpts::default()).unwrap();
+    let hits = index::search(&conn, "install", &index::SearchOpts::default(), None, None).unwrap();
     assert!(!hits.is_empty(), "expected at least one search hit for `install`");
     assert!(hits.iter().any(|h| h.doc_id == ID_INSTALL));
 

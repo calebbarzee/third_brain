@@ -68,11 +68,19 @@ pub fn tick(cfg: &Config) -> Result<TickReport> {
     let session_ids: HashSet<String> = sessions.iter().map(|s| s.id.clone()).collect();
     if let Ok(listing) = git::worktree_list_porcelain(&cfg.root) {
         for block in listing.split("\n\n") {
-            let Some(path) = block.lines().find_map(|l| l.strip_prefix("worktree ")) else { continue };
+            let Some(path) = block.lines().find_map(|l| l.strip_prefix("worktree ")) else {
+                continue;
+            };
             if !path.contains("worktrees") {
                 continue;
             }
-            let Some(id) = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
+            let Some(id) = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
             if session_ids.contains(&id) {
                 continue;
             }
@@ -91,6 +99,9 @@ pub fn tick(cfg: &Config) -> Result<TickReport> {
 
     let _ = git::worktree_prune(&cfg.root);
     std::fs::create_dir_all(cfg.state_dir())?;
-    std::fs::write(cfg.state_dir().join("last_tick"), chrono::Utc::now().to_rfc3339())?;
+    std::fs::write(
+        cfg.state_dir().join("last_tick"),
+        chrono::Utc::now().to_rfc3339(),
+    )?;
     Ok(report)
 }

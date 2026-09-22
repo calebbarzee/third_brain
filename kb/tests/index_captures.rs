@@ -106,12 +106,12 @@ fn captures_are_indexed_but_excluded_from_default_search() {
     let conn = index::open_newest(&cfg).unwrap();
 
     // default search never returns a capture, even for a word that exists only in capture text.
-    let default_hits = index::search(&conn, UNIQUE_WORD, &index::SearchOpts::default()).unwrap();
+    let default_hits = index::search(&conn, UNIQUE_WORD, &index::SearchOpts::default(), None, None).unwrap();
     assert!(default_hits.is_empty(), "default search must not surface captures: {default_hits:?}");
 
     // include_captures widens the candidate set and finds it.
     let opts = index::SearchOpts { include_captures: true, ..Default::default() };
-    let wide_hits = index::search(&conn, UNIQUE_WORD, &opts).unwrap();
+    let wide_hits = index::search(&conn, UNIQUE_WORD, &opts, None, None).unwrap();
     assert!(wide_hits.iter().any(|h| h.doc_id == capture_a.capture_id && h.kind == "capture"), "expected capture a in {wide_hits:?}");
     let hit = wide_hits.iter().find(|h| h.doc_id == capture_a.capture_id).unwrap();
     assert_eq!(hit.source_uri.as_deref(), Some("file:/a.txt"));

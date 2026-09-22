@@ -128,9 +128,9 @@ fn extract_terms(text: &str) -> Vec<String> {
 /// OR-joined string through it cannot produce OR semantics -- issuing one search per term and
 /// merging here is the equivalent that works within that existing, unmodified contract.
 fn search_terms(conn: &Connection, terms: &[String], matched: &mut MatchedDocs) {
-    let opts = index::SearchOpts { limit: 10, status_any: false, include_captures: false };
+    let opts = index::SearchOpts { limit: 10, ..Default::default() };
     for term in terms {
-        let Ok(hits) = index::search(conn, term, &opts) else { continue };
+        let Ok(hits) = index::search(conn, term, &opts, None, None) else { continue };
         for hit in hits {
             let entry = matched.entry(hit.doc_id.clone()).or_insert((0.0, Vec::new()));
             if !entry.1.iter().any(|(p, _)| p == &hit.heading_path) {

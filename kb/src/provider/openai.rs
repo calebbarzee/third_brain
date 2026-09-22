@@ -91,6 +91,24 @@ pub fn map_response(raw: Value) -> CompletionResponse {
     CompletionResponse { blocks, usage, stop_reason, raw }
 }
 
+/// build the `/embeddings` request body: `{model, input: [...]}`.
+pub fn build_embed_body(model: &str, inputs: &[String]) -> Value {
+    json!({ "model": model, "input": inputs })
+}
+
+/// map an `/embeddings` response body (`{"data": [{"embedding": [...]}, ...]}`) into one vector
+/// per input, in order (openai's `data` is already index-ordered). pure so it can be
+/// unit-tested against fixture json without network.
+pub fn map_embed_response(raw: Value) -> Result<Vec<Vec<f32>>> {
+    let data = raw["data"].as_array().context("openai embed response missing `data` array")?;
+    data.iter()
+        .map(|d| {
+            let inner = d["embedding"].as_array().context("openai embed response: a `data` entry has no `embedding` array")?;
+            Ok(inner.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect())
+        })
+        .collect()
+}
+
 impl Provider for OpenAiProvider {
     fn name(&self) -> &str {
         "openai"
@@ -114,6 +132,30 @@ impl Provider for OpenAiProvider {
         }
         let raw: Value = serde_json::from_str(&text).context("openai response is not valid json")?;
         Ok(map_response(raw))
+    }
+
+    fn supports_embed(&self) -> bool {
+        true
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let body = build_embed_body(&self.model, texts);
+        let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .post(&url)
+            .header("authorization", format!("Bearer {}", self.api_key))
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .context("openai embed request failed to send")?;
+        let status = resp.status();
+        let text = resp.text().context("reading openai embed response body")?;
+        if !status.is_success() {
+            bail!("openai embed request failed: {status} {}", truncate(&text, 500));
+        }
+        let raw: Value = serde_json::from_str(&text).context("openai embed response is not valid json")?;
+        map_embed_response(raw)
     }
 }
 
@@ -155,6 +197,23 @@ mod tests {
         assert_eq!(body["response_format"]["json_schema"]["name"], "output");
         assert_eq!(body["response_format"]["json_schema"]["strict"], false);
         assert_eq!(body["response_format"]["json_schema"]["schema"]["type"], "object");
+    }
+
+    #[test]
+    fn build_embed_body_sets_model_and_input() {
+        let body = build_embed_body("text-embedding-3-small", &["a".to_string(), "b".to_string()]);
+        assert_eq!(body["model"], "text-embedding-3-small");
+        assert_eq!(body["input"][0], "a");
+        assert_eq!(body["input"][1], "b");
+    }
+
+    #[test]
+    fn map_embed_response_reads_data_embeddings() {
+        let raw = json!({ "data": [{ "embedding": [0.1, 0.2] }, { "embedding": [0.3, 0.4] }] });
+        let vecs = map_embed_response(raw).unwrap();
+        assert_eq!(vecs.len(), 2);
+        assert_eq!(vecs[0], vec![0.1_f32, 0.2_f32]);
+        assert_eq!(vecs[1], vec![0.3_f32, 0.4_f32]);
     }
 
     #[test]

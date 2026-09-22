@@ -15,6 +15,15 @@
 //! - `merge`    `kb merge`: fetch, rebase, the three checks, land, review class, tick, history.
 //! - `store`    the content store: blobs, the capture catalog, normalizers, source adapters.
 //! - `curate`   the `curate` hook: captures or a free-text proposal into operations in a session.
+//! - `answer`   the `answer` hook: search, answer from the passages, cite, and record usage;
+//!   also `kb eval`'s mrr@10/recall@5 over `eval/queries.toml` (design.md §18, §31).
+//! - `server`   design.md §23 (local and server): tokens, rest, mcp (stdio and http), `kb serve`.
+//! - `maintain` `curate-nightly` (design.md §15.3): detectors, auto-fix, escalations, compaction.
+//! - `backup`   design.md §21: mirror push, bundles, content-store copy, the backups manifest.
+//! - `import`   `kb import`: existing markdown notes into documents (design.md §6, §9, §12).
+//! - `schedule` `kb schedule`: systemd user units (or crontab lines) for tick, capture, eod,
+//!   nightly, and backups.
+//! - `status`   `kb status`: one screen summarizing repository health.
 //! - `cli`      clap command definitions and handlers.
 
 pub mod model;
@@ -31,4 +40,11 @@ pub mod review;
 pub mod merge;
 pub mod store;
 pub mod curate;
+pub mod answer;
+pub mod server;
+pub mod maintain;
+pub mod backup;
+pub mod import;
+pub mod schedule;
+pub mod status;
 pub mod cli;

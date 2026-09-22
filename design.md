@@ -451,6 +451,10 @@ critical structures are declared, not guessed:
 
 the gate parses base and head, section-diffs each changed document, collects the touched structures, and emits `class = auto | review` with per-document reasons as a `gate` event in the run log and a label on the pull request. it fails only on parse errors, graph cycles, missing pointers, and secrets. for a human session it classifies and never blocks: auto class merges when the other checks pass; review class waits for one approval.
 
+### 15.1a quick gate
+
+a cheap classifier runs before content review when a `gate` provider is configured. it labels a settled change `trivial` (formatting, typos, link fixes, wording with no change of meaning) or `substantive` with a probability. a human session classed auto whose change is `trivial` at or above the review confidence threshold skips the full content review; the answer is recorded as a `check` event either way. agent sessions and review-class changes always get the full review. the `gate` role is meant for a small local model or a purpose-built classifier through the `command` provider kind.
+
 ### 15.2 content review
 
 the `review` hook runs as its own run when a merge is requested or a session is updated.
@@ -637,7 +641,7 @@ mcp surface: `search`, `get`, `refs`, `propose`, `run`. rest exposes the same fi
 
 ## 19. hooks, prompts, provider
 
-**provider.** hooks never call a vendor sdk. they build a request, hand it to the provider configured for the hook's role in `kb.toml`, and process the response. blocks are text, tool use, tool result, and reasoning with an opaque provider payload. rules: request the most detailed reasoning each provider offers; round-trip opaque reasoning byte for byte; store the raw response always; use native structured output where available, else a validated json block with one retry. roles: `curate`, `classify`, `contextualize`, `answer`, `review`, `resolve`, `embed`, `rerank`. with no provider configured a hook returns a deferred prompt (§16).
+**provider.** hooks never call a vendor sdk. they build a request, hand it to the provider configured for the hook's role in `kb.toml`, and process the response. provider kinds: `anthropic`, `openai` (and any openai-compatible server through `base_url`), `ollama`, `claude-code` (the locally installed `claude` command in print mode, billed to the owner's subscription, no api key), and `command` (any local executable that reads a prompt on stdin and writes the reply on stdout, for custom classifiers). blocks are text, tool use, tool result, and reasoning with an opaque provider payload. rules: request the most detailed reasoning each provider offers; round-trip opaque reasoning byte for byte; store the raw response always; use native structured output where available, else a validated json block with one retry. roles: `curate`, `classify`, `contextualize`, `answer`, `review`, `resolve`, `embed`, `rerank`. with no provider configured a hook returns a deferred prompt (§16).
 
 | hook | purpose | local trigger | server trigger |
 |---|---|---|---|
@@ -862,7 +866,7 @@ all in `manifest.toml` unless noted.
 | critical sections by layer | `principle`, `design`: all; `decision`: `decision`, `consequences`; `procedure`: `prerequisites`, `rollback` |
 | criticality band | lowest 20 percent of canon documents; undefined below 50 canon documents |
 | criticality weights | 0.25, 0.30, 0.20, 0.15, 0.10 (§17.4) |
-| review approve threshold | confidence 0.7; nightly revert 0.9 |
+| review approve threshold | confidence 0.7; nightly revert 0.9; quick gate skip at 0.7 |
 | classify retries | 3, then deterministic defaults |
 | review retries | 2 |
 | near-duplicate | 0.92 cosine |

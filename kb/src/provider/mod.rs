@@ -6,9 +6,13 @@
 
 pub mod anthropic;
 pub mod classify;
+pub mod claude_code;
+pub mod command;
+pub mod gate;
 pub mod ollama;
 pub mod openai;
 pub mod structured;
+mod subprocess;
 
 use crate::config::Config;
 use anyhow::{Result, bail};
@@ -69,6 +73,31 @@ pub struct CompletionResponse {
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse>;
+
+    /// embed a batch of texts, one vector per input, in order. design.md §19's `embed` role.
+    /// the default is "not supported"; `supports_embed` lets a caller check first instead of
+    /// paying for a request that will only fail.
+    fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        bail!("{} provider does not support embed", self.name())
+    }
+
+    /// whether `embed` is implemented for this provider.
+    fn supports_embed(&self) -> bool {
+        false
+    }
+
+    /// cross-encoder rerank: a relevance score per candidate, same order as `candidates`, given
+    /// `query`. design.md §19's `rerank` role; not implemented by any adapter yet (design.md
+    /// §32: "rerank model, hosted or local | | after step 5"), so the default always errs and
+    /// retrieval checks `supports_rerank` first and skips the step rather than calling this.
+    fn rerank(&self, _query: &str, _candidates: &[String]) -> Result<Vec<f64>> {
+        bail!("{} provider does not support rerank", self.name())
+    }
+
+    /// whether `rerank` is implemented for this provider.
+    fn supports_rerank(&self) -> bool {
+        false
+    }
 }
 
 /// build the provider configured for `role` in `cfg.kb.providers`. `Ok(None)` means no
@@ -82,7 +111,11 @@ pub fn provider_for_role(cfg: &Config, role: &str) -> Result<Option<Box<dyn Prov
         "anthropic" => Box::new(anthropic::AnthropicProvider::new(pc)?),
         "openai" => Box::new(openai::OpenAiProvider::new(pc)?),
         "ollama" => Box::new(ollama::OllamaProvider::new(pc)?),
-        other => bail!("role \"{role}\": unknown provider kind \"{other}\" (expected anthropic, openai, or ollama)"),
+        "claude-code" => Box::new(claude_code::ClaudeCodeProvider::new(pc)?),
+        "command" => Box::new(command::CommandProvider::new(pc)?),
+        other => bail!(
+            "role \"{role}\": unknown provider kind \"{other}\" (expected anthropic, openai, ollama, claude-code, or command)"
+        ),
     };
     Ok(Some(provider))
 }

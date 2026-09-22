@@ -16,6 +16,7 @@ use crate::index;
 use crate::model::{AgentPolicy, MergeClass, Status};
 use crate::parse::{parse_body, parse_document};
 use crate::policy::{Actor, ActorKind};
+use crate::provider::{self, Provider};
 use crate::review;
 use crate::runlog::{RunLog, RunStart, RunStatus, Verdict as RunlogVerdict};
 use crate::session::{self, Session, SessionState};
@@ -88,6 +89,15 @@ pub struct ReviewItem {
 
 /// `kb merge <session>`: design.md §13, steps 1 through 7.
 pub fn merge(cfg: &Config, session_id: &str, opts: MergeOpts) -> Result<MergeOutcome> {
+    merge_with_providers(cfg, session_id, opts, None)
+}
+
+/// like `merge`, but the quick gate's provider (role `gate`) can be substituted with
+/// `gate_override` instead of the one `kb.toml` names -- the seam a test uses to script a
+/// `FakeProvider` gate answer without a real `gate` role configured. production code always
+/// calls `merge`, which forwards here with `None` (build whatever `kb.toml` configures, same as
+/// every other role).
+pub fn merge_with_providers(cfg: &Config, session_id: &str, opts: MergeOpts, gate_override: Option<&dyn Provider>) -> Result<MergeOutcome> {
     let mut session = session::load(cfg, session_id)?;
 
     let mut log = RunLog::create(
@@ -203,7 +213,15 @@ pub fn merge(cfg: &Config, session_id: &str, opts: MergeOpts) -> Result<MergeOut
         let detail = if reasons.is_empty() { "auto: no critical structure touched".to_string() } else { reasons.join("; ") };
         checks.push(CheckResult { name: "gate".into(), pass: class == MergeClass::Auto, detail });
 
-        // step 5: content review.
+        // step 5: content review, with a quick-gate short circuit ahead of it. a cheap
+        // classifier (the `gate` role) gets one shot at "trivial" before the full review call:
+        // never asked for an agent actor or a review-class change (both always get full
+        // review), and a skip only takes effect at or above `review_confidence`, the same bar
+        // §15.2 uses for the full reviewer's own approve/review split.
+        let quick_gate = quick_gate_check(cfg, &session, &head, class, actor_is_agent, gate_override, &mut log)?;
+        if let QuickGate::Skip { p } = quick_gate {
+            checks.push(CheckResult::ok("review", format!("quick gate: trivial (p={p:.2}); full review skipped")));
+        } else {
         match content_review(cfg, &session, &base, &head)? {
             Some(out) => {
                 let decision = review::decide(cfg, &out);
@@ -247,6 +265,7 @@ pub fn merge(cfg: &Config, session_id: &str, opts: MergeOpts) -> Result<MergeOut
             None => {
                 checks.push(CheckResult::ok("review", "no review provider configured; self_review"));
             }
+        }
         }
 
         if opts.check_only {
@@ -571,6 +590,14 @@ fn check_delete_guard(cfg: &Config, repo: &Path, base: &str, path: &str, deleted
     if !ok_status {
         return Err(format!("{path}: status must be superseded, archived, or a draft older than {} days to delete", cfg.manifest.thresholds.draft_ttl_days));
     }
+    // backed-up precondition (design §17.4): the file's last commit must be at or before the
+    // newest mirrored and bundled commits; without a backup configured this passes with a note.
+    if let Some(sha) = git::last_commit_sha(repo, path) {
+        let (ok, detail) = crate::backup::delete_allowed_by_backup(cfg, &sha).map_err(|e| e.to_string())?;
+        if !ok {
+            return Err(format!("{path}: {detail}"));
+        }
+    }
 
     if !id.is_empty() {
         let pattern = format!("kb:{id}");
@@ -628,7 +655,11 @@ fn run_structure_gate(cfg: &Config, session: &Session, base: &str, head: &str, a
         } else {
             git::show_file(repo, head, &path).ok().and_then(|b| String::from_utf8(b).ok()).and_then(|t| parse_document(&t).ok())
         }) else {
-            // a deletion: covered by the delete guard, not the structure gate.
+            // a deletion is review class always (design §11, §15.3); the delete guard checks its
+            // preconditions separately.
+            class = MergeClass::Review;
+            let label = base_doc.as_ref().and_then(|d| d.frontmatter.id.clone()).unwrap_or(path.clone());
+            reasons.push(format!("{label}: delete is review class"));
             continue;
         };
 
@@ -657,8 +688,61 @@ fn run_structure_gate(cfg: &Config, session: &Session, base: &str, head: &str, a
 }
 
 // ---------------------------------------------------------------------------------------------
-// step 5: content review (design.md §15.2, `review::gather` + `review::review` + `review::decide`)
+// step 5: quick gate, then content review (design.md §15.2, `review::gather` + `review::review`
+// + `review::decide`; the quick gate is an addendum ahead of the full review call, not in the
+// design doc's own text)
 // ---------------------------------------------------------------------------------------------
+
+enum QuickGate {
+    /// the gate said "trivial" at or above `review_confidence`: full review is skipped.
+    Skip { p: f64 },
+    /// the gate was never asked (agent actor, review-class change, or no `gate` provider), or it
+    /// answered but not confidently enough: full review runs as it always has.
+    RunFull,
+}
+
+/// ask the `gate` role, when one is configured, whether a settled human change on an
+/// already-auto-class session is trivial enough to skip the full content review. logs a `check`
+/// event with the gate's answer whenever it is actually asked; when it is not asked at all
+/// (an agent actor, a review-class change, or no `gate` provider configured) there is no answer
+/// to log, and `content_review` runs exactly as it did before this existed.
+fn quick_gate_check(
+    cfg: &Config,
+    session: &Session,
+    head: &str,
+    class: MergeClass,
+    actor_is_agent: bool,
+    gate_override: Option<&dyn Provider>,
+    log: &mut RunLog,
+) -> Result<QuickGate> {
+    if actor_is_agent || class != MergeClass::Auto {
+        return Ok(QuickGate::RunFull);
+    }
+
+    let message = git::commit_message(&session.worktree, head).unwrap_or_default();
+    let diff = git::run(&session.worktree, &["diff", &session.base_commit, head, "--", "docs/"]).unwrap_or_default();
+    let text = provider::truncate(&format!("commit message:\n{message}\n\ndiff:\n{diff}"), 6_000);
+    let question = provider::gate::GateQuestion {
+        labels: vec!["trivial".to_string(), "substantive".to_string()],
+        text,
+        context: Some("trivial means formatting, typos, link fixes, or wording with no change of meaning".to_string()),
+    };
+
+    let answer = match gate_override {
+        Some(p) => Some(provider::gate::gate_with(p, cfg, &question)?),
+        None => provider::gate::gate(cfg, &question)?,
+    };
+    let Some(answer) = answer else { return Ok(QuickGate::RunFull) };
+
+    let detail = format!("label={} p={:.2}: {}", answer.label, answer.p, answer.reason);
+    log.check("quick-gate", answer.label == "trivial", Some(detail.as_str()))?;
+
+    if answer.label == "trivial" && answer.p >= cfg.manifest.thresholds.review_confidence {
+        Ok(QuickGate::Skip { p: answer.p })
+    } else {
+        Ok(QuickGate::RunFull)
+    }
+}
 
 /// build the review packet's input and run it. `Ok(None)` when no `review` provider is
 /// configured (the design's documented self-review fallback), not an error.
@@ -867,4 +951,94 @@ pub fn review_reject(cfg: &Config, session_id: &str, reason: &str) -> Result<()>
     session::save(cfg, &session)?;
     println!("session {} rejected: {reason}", session.id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! the quick gate's skip and no-skip paths (design.md §15.2's addendum), against a
+    //! `FakeProvider` gate answer injected through `merge_with_providers`'s `gate_override`
+    //! seam -- no real `gate` role is configured in these fixtures.
+
+    use super::*;
+    use crate::provider::fake::FakeProvider;
+
+    const ID: &str = "01K5A7Q2XW3ZRCM8T6YB4VJH2A";
+
+    fn doc(body: &str) -> String {
+        format!("+++\nid = \"{ID}\"\nlayer = \"reference\"\ntitle = \"quick gate doc\"\nstatus = \"canon\"\nagent_policy = \"editable\"\nowner = \"caleb\"\n+++\n\n# quick gate doc\n\n{body}\n")
+    }
+
+    /// a repo with the `kb init` skeleton plus one committed reference-layer document, then a
+    /// human session that makes one small edit to it (auto class under the structure gate: a
+    /// `reference` document, `editable`, no locked fields touched) and settles.
+    fn repo_with_settled_edit() -> (tempfile::TempDir, Config, Session) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::cli::init::init(root, false, false).unwrap();
+        git::run(root, &["config", "user.name", "test user"]).unwrap();
+        git::run(root, &["config", "user.email", "test@example.com"]).unwrap();
+        std::fs::write(root.join("docs").join(format!("{ID}.md")), doc("original text.")).unwrap();
+        git::commit_all(root, "seed quick gate doc").unwrap();
+
+        let cfg = Config::load(root).unwrap();
+        let mut s = session::open(&cfg, "edit quick gate doc", None, &[]).unwrap();
+        std::fs::write(s.worktree.join("docs").join(format!("{ID}.md")), doc("revised text.")).unwrap();
+        git::commit_all(&s.worktree, "wip: revise").unwrap();
+        session::settle(&cfg, &mut s, None).unwrap();
+        (dir, cfg, s)
+    }
+
+    #[test]
+    fn quick_gate_skips_full_review_when_trivial_and_confident() {
+        let (_dir, cfg, s) = repo_with_settled_edit();
+        let threshold = cfg.manifest.thresholds.review_confidence;
+        let gate = FakeProvider::new(vec![format!(r#"{{"label": "trivial", "p": {:.2}, "reason": "wording only"}}"#, threshold + 0.05)]);
+
+        let outcome = merge_with_providers(&cfg, &s.id, MergeOpts::default(), Some(&gate)).unwrap();
+
+        assert!(outcome.landed.is_some(), "{outcome:?}");
+        assert_eq!(outcome.class, MergeClass::Auto);
+        let review_check = outcome.checks.iter().find(|c| c.name == "review").expect("a review check is always recorded");
+        assert!(review_check.pass);
+        assert!(review_check.detail.contains("quick gate: trivial"), "{review_check:?}");
+        assert!(review_check.detail.contains("full review skipped"), "{review_check:?}");
+    }
+
+    #[test]
+    fn quick_gate_runs_full_review_when_substantive() {
+        let (_dir, cfg, s) = repo_with_settled_edit();
+        let gate = FakeProvider::new(vec![r#"{"label": "substantive", "p": 0.9, "reason": "changes the meaning"}"#.to_string()]);
+
+        let outcome = merge_with_providers(&cfg, &s.id, MergeOpts::default(), Some(&gate)).unwrap();
+
+        assert!(outcome.landed.is_some(), "{outcome:?}");
+        let review_check = outcome.checks.iter().find(|c| c.name == "review").expect("a review check is always recorded");
+        assert!(review_check.pass);
+        // no `gate` provider is configured for role "review", so the full review falls back to
+        // self-review, same as it always has -- proof the quick gate did not short-circuit it.
+        assert!(review_check.detail.contains("self_review"), "{review_check:?}");
+        assert!(!review_check.detail.contains("quick gate"), "{review_check:?}");
+    }
+
+    #[test]
+    fn quick_gate_runs_full_review_when_not_confident_enough() {
+        let (_dir, cfg, s) = repo_with_settled_edit();
+        let threshold = cfg.manifest.thresholds.review_confidence;
+        let gate = FakeProvider::new(vec![format!(r#"{{"label": "trivial", "p": {:.2}, "reason": "borderline"}}"#, threshold - 0.05)]);
+
+        let outcome = merge_with_providers(&cfg, &s.id, MergeOpts::default(), Some(&gate)).unwrap();
+
+        assert!(outcome.landed.is_some(), "{outcome:?}");
+        let review_check = outcome.checks.iter().find(|c| c.name == "review").expect("a review check is always recorded");
+        assert!(review_check.detail.contains("self_review"), "{review_check:?}");
+    }
+
+    #[test]
+    fn no_gate_override_and_no_configured_provider_runs_full_review_as_before() {
+        let (_dir, cfg, s) = repo_with_settled_edit();
+        let outcome = merge_with_providers(&cfg, &s.id, MergeOpts::default(), None).unwrap();
+        assert!(outcome.landed.is_some(), "{outcome:?}");
+        let review_check = outcome.checks.iter().find(|c| c.name == "review").unwrap();
+        assert!(review_check.detail.contains("self_review"), "{review_check:?}");
+    }
 }

@@ -1,6 +1,6 @@
 //! `kb revert` and `kb doctor`: design.md §21 (history, backups, compaction).
 
-use super::{merge, MergeOpts, MergeOutcome};
+use super::{MergeOpts, MergeOutcome, merge};
 use crate::config::Config;
 use crate::git;
 use crate::session::{self, SessionState};
@@ -14,11 +14,15 @@ pub fn revert(cfg: &Config, target: &str) -> Result<MergeOutcome> {
     if commits.is_empty() {
         commits = git::log_grep(&cfg.root, "main", &format!("Run: {target}"))?;
     }
-    if commits.is_empty() && let Ok(sha) = git::rev_parse(&cfg.root, target) {
+    if commits.is_empty()
+        && let Ok(sha) = git::rev_parse(&cfg.root, target)
+    {
         commits = vec![sha];
     }
     if commits.is_empty() {
-        bail!("no commit on `main` matches `{target}` (looked for a Session:/Run: trailer and a bare sha)");
+        bail!(
+            "no commit on `main` matches `{target}` (looked for a Session:/Run: trailer and a bare sha)"
+        );
     }
 
     // `git log --grep` already lists newest first; design.md §14/§21 wants the most recent
@@ -50,15 +54,20 @@ pub fn doctor(cfg: &Config) -> Result<Vec<String>> {
     }
 
     let sessions = session::list(cfg)?;
-    let session_ids: std::collections::HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    let session_ids: std::collections::HashSet<&str> =
+        sessions.iter().map(|s| s.id.as_str()).collect();
 
     if let Ok(listing) = git::worktree_list_porcelain(&cfg.root) {
         for block in listing.split("\n\n") {
-            let Some(path) = block.lines().find_map(|l| l.strip_prefix("worktree ")) else { continue };
+            let Some(path) = block.lines().find_map(|l| l.strip_prefix("worktree ")) else {
+                continue;
+            };
             if !path.contains("worktrees") {
                 continue;
             }
-            if let Some(id) = std::path::Path::new(path).file_name().and_then(|n| n.to_str())
+            if let Some(id) = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
                 && !session_ids.contains(id)
             {
                 report.push(format!("stale worktree with no session file: {path}"));
@@ -67,8 +76,13 @@ pub fn doctor(cfg: &Config) -> Result<Vec<String>> {
     }
 
     for s in &sessions {
-        if !s.worktree.is_dir() && !matches!(s.state, SessionState::Merged | SessionState::Abandoned) {
-            report.push(format!("session {} is state {} but its worktree is gone", s.id, s.state));
+        if !s.worktree.is_dir()
+            && !matches!(s.state, SessionState::Merged | SessionState::Abandoned)
+        {
+            report.push(format!(
+                "session {} is state {} but its worktree is gone",
+                s.id, s.state
+            ));
         }
     }
 

@@ -1,15 +1,23 @@
 //! clap command tree. subcommand groups live in their own files and are wired here.
+pub mod answer;
 pub mod archive;
+pub mod backup;
 pub mod check;
 pub mod curate;
+pub mod gate;
+pub mod import;
 pub mod index;
 pub mod init;
+pub mod maintain;
 pub mod merge;
 pub mod policy;
 pub mod provider;
 pub mod review;
 pub mod run;
+pub mod schedule;
+pub mod serve;
 pub mod session;
+pub mod status;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -78,6 +86,25 @@ pub enum Command {
     /// curate: turn captures or a proposal into operations inside a session
     #[command(subcommand)]
     Curate(curate::CurateCommand),
+    /// import existing markdown notes as documents through one session
+    Import(import::ImportArgs),
+    /// systemd user timers (or cron lines) for tick, capture, eod, nightly, backup, serve
+    #[command(subcommand)]
+    Schedule(schedule::ScheduleCommand),
+    /// one screen of repository, session, index, capture, backup, and scheduler state
+    Status,
+    /// ask a question over the knowledge base, or evaluate retrieval quality
+    #[command(subcommand)]
+    Answer(answer::AnswerCommand),
+    /// http server (rest and mcp), stdio mcp server, and bearer tokens
+    #[command(flatten)]
+    Serve(serve::ServeCommand),
+    /// nightly curation, its escalation queue, and compaction
+    #[command(subcommand)]
+    Maintain(maintain::MaintainCommand),
+    /// mirror push, bundles, and the content-store copy
+    #[command(subcommand)]
+    Backup(backup::BackupCommand),
     /// index build and read commands: build, search, get, show, refs, ls, blame, graph
     #[command(subcommand)]
     Index(index::IndexCommand),
@@ -103,6 +130,9 @@ pub enum Command {
     Doctor,
     /// reconciliation tick: rebuild a stale index, repair sessions, prune worktrees
     Tick,
+    /// quick gate: run the cheap classifier configured for role `gate` by hand
+    #[command(subcommand)]
+    Gate(gate::GateCommand),
     /// agent policy: decide one operation, or list allowed operations for a document
     #[command(subcommand)]
     Policy(policy::PolicyCommand),
@@ -208,7 +238,7 @@ pub fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Command::Search { query, limit, status_any } => {
             let cfg = load_config(&cli.repo)?;
-            index::run(&cfg, index::IndexCommand::Search { query, limit, status_any, include_captures: false }, cli.json)
+            index::run(&cfg, index::IndexCommand::Search { query, limit, status_any, include_captures: false, mode: None, explain: false, record: false }, cli.json)
         }
         Command::Get { id } => {
             let cfg = load_config(&cli.repo)?;
@@ -229,6 +259,34 @@ pub fn run(cli: Cli) -> anyhow::Result<i32> {
         Command::Curate(cmd) => {
             let cfg = load_config(&cli.repo)?;
             curate::run(&cfg, cmd, cli.json)
+        }
+        Command::Import(args) => {
+            let cfg = load_config(&cli.repo)?;
+            import::run_import(&cfg, args, cli.json)
+        }
+        Command::Schedule(cmd) => {
+            let cfg = load_config(&cli.repo)?;
+            schedule::run(&cfg, cmd, cli.json)
+        }
+        Command::Status => {
+            let cfg = load_config(&cli.repo)?;
+            status::run_status(&cfg, cli.json)
+        }
+        Command::Answer(cmd) => {
+            let cfg = load_config(&cli.repo)?;
+            answer::run(&cfg, cmd, cli.json)
+        }
+        Command::Serve(cmd) => {
+            let cfg = load_config(&cli.repo)?;
+            serve::run(&cfg, cmd, cli.json)
+        }
+        Command::Maintain(cmd) => {
+            let cfg = load_config(&cli.repo)?;
+            maintain::run(&cfg, cmd, cli.json)
+        }
+        Command::Backup(cmd) => {
+            let cfg = load_config(&cli.repo)?;
+            backup::run(&cfg, cmd, cli.json)
         }
         Command::Index(cmd) => {
             let cfg = load_config(&cli.repo)?;
@@ -270,6 +328,10 @@ pub fn run(cli: Cli) -> anyhow::Result<i32> {
         Command::Tick => {
             let cfg = load_config(&cli.repo)?;
             merge::run(&cfg, merge::MergeCommand::Tick, cli.json)
+        }
+        Command::Gate(cmd) => {
+            let cfg = load_config(&cli.repo)?;
+            gate::run(&cfg, cmd, cli.json)
         }
         Command::Policy(cmd) => {
             let cfg = load_config(&cli.repo)?;

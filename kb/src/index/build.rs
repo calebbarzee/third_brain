@@ -6,9 +6,13 @@ use crate::git;
 use crate::index::gitlog::{self, CommitInfo};
 use crate::index::graph;
 use crate::index::criticality;
+use crate::index::prefix;
 use crate::index::schema::create_schema;
+use crate::index::vectors;
 use crate::model::{self, Frontmatter, InlineLink, Section, Status};
+use crate::provider::{self, Provider};
 use crate::store::catalog::{self, Capture};
+use crate::store::usage;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset};
 use rusqlite::{Connection, OpenFlags, params};
@@ -34,6 +38,15 @@ pub struct BuildReport {
     pub chunk_count: usize,
     pub finding_count: usize,
     pub maintenance_enabled: bool,
+    /// whether `chunk_vectors` was populated this build (an `embed`-role provider was configured
+    /// and supports it; design.md §17.1, §19).
+    pub vectors_enabled: bool,
+    /// rows in `chunk_vectors` (0 when `vectors_enabled` is false).
+    pub vector_count: usize,
+    /// chunks whose prefix was computed fresh this build (a provider call, or the deterministic
+    /// fallback with no `contextualize` provider configured), as opposed to served from
+    /// `prefix_cache`.
+    pub prefixes_generated: usize,
 }
 
 /// a resolved edge from a document to a uri, as stored in the `refs` table.
@@ -55,11 +68,25 @@ fn index_dir(cfg: &Config) -> PathBuf {
     cfg.root.join(".kb").join("index")
 }
 
-/// build (or reuse) the artifact for `target` (defaults to `HEAD`). the final rename onto
-/// `<commit>.sqlite` happens through `fs::hard_link`, which is atomic and fails with `AlreadyExists`
-/// when another build already finished first, so two concurrent builds of one commit are harmless
-/// and only one artifact ever survives.
+/// build (or reuse) the artifact for `target` (defaults to `HEAD`), using whatever `contextualize`
+/// and `embed` providers are configured in `kb.toml`. exactly `build_with_providers(cfg, target,
+/// None, None)`.
 pub fn build(cfg: &Config, target: Option<&str>) -> Result<BuildReport> {
+    build_with_providers(cfg, target, None, None)
+}
+
+/// `build`, with explicit provider overrides for the `contextualize` and `embed` roles: `Some`
+/// bypasses `kb.toml` entirely for that role (used by tests, with a fake provider that never
+/// touches the network); `None` falls back to `provider::provider_for_role`, same as `build`. the
+/// final rename onto `<commit>.sqlite` happens through `fs::hard_link`, which is atomic and fails
+/// with `AlreadyExists` when another build already finished first, so two concurrent builds of
+/// one commit are harmless and only one artifact ever survives.
+pub fn build_with_providers(
+    cfg: &Config,
+    target: Option<&str>,
+    contextualize: Option<&dyn Provider>,
+    embed: Option<&dyn Provider>,
+) -> Result<BuildReport> {
     let root = &cfg.root;
     let target_rev = target.unwrap_or("HEAD");
     let commit = git::rev_parse(root, target_rev).with_context(|| format!("resolving {target_rev}"))?;
@@ -77,7 +104,7 @@ pub fn build(cfg: &Config, target: Option<&str>) -> Result<BuildReport> {
     if tmp_path.exists() {
         std::fs::remove_file(&tmp_path).ok();
     }
-    let mut report = build_into(cfg, &commit, &tmp_path)?;
+    let mut report = build_into(cfg, &commit, &tmp_path, contextualize, embed)?;
 
     match std::fs::hard_link(&tmp_path, &final_path) {
         Ok(()) => {
@@ -116,7 +143,7 @@ pub fn refresh_captures(cfg: &Config, target: Option<&str>) -> Result<BuildRepor
     if tmp_path.exists() {
         std::fs::remove_file(&tmp_path).ok();
     }
-    let mut report = build_into(cfg, &commit, &tmp_path)?;
+    let mut report = build_into(cfg, &commit, &tmp_path, None, None)?;
 
     let mut n = 1u32;
     loop {
@@ -160,6 +187,7 @@ pub fn newest_artifact(cfg: &Config) -> Option<PathBuf> {
 
 /// open the newest artifact read-only.
 pub fn open_newest(cfg: &Config) -> Result<Connection> {
+    super::vectors::register_extension();
     let path = newest_artifact(cfg).context("no index artifact found; run `kb index build` first")?;
     Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).with_context(|| format!("opening {}", path.display()))
 }
@@ -173,6 +201,14 @@ fn quick_report(path: &Path, commit: &str) -> Result<BuildReport> {
     let finding_count: i64 = conn.query_row("select count(*) from findings", [], |r| r.get(0))?;
     let maintenance_enabled: String =
         conn.query_row("select value from meta where key = 'maintenance_enabled'", [], |r| r.get(0)).unwrap_or_else(|_| "1".to_string());
+    let vectors_enabled: String = conn.query_row("select value from meta where key = 'vectors_enabled'", [], |r| r.get(0)).unwrap_or_else(|_| "0".to_string());
+    let vector_count: i64 = conn.query_row("select count(*) from sqlite_master where type = 'table' and name = 'chunk_vectors'", [], |r| r.get(0))
+        .ok()
+        .filter(|n: &i64| *n > 0)
+        .and_then(|_| conn.query_row("select count(*) from chunk_vectors", [], |r| r.get(0)).ok())
+        .unwrap_or(0);
+    let prefixes_generated: i64 =
+        conn.query_row("select value from meta where key = 'prefixes_generated'", [], |r| r.get(0)).ok().and_then(|s: String| s.parse().ok()).unwrap_or(0);
     Ok(BuildReport {
         commit: commit.to_string(),
         artifact_path: path.to_path_buf(),
@@ -183,6 +219,9 @@ fn quick_report(path: &Path, commit: &str) -> Result<BuildReport> {
         chunk_count: chunk_count as usize,
         finding_count: finding_count as usize,
         maintenance_enabled: maintenance_enabled == "1",
+        vectors_enabled: vectors_enabled == "1",
+        vector_count: vector_count as usize,
+        prefixes_generated: prefixes_generated as usize,
     })
 }
 
@@ -625,7 +664,22 @@ fn load_captures(conn: &Connection, cfg: &Config) -> Result<Vec<ParsedCapture>> 
     Ok(out)
 }
 
-fn build_into(cfg: &Config, commit: &str, tmp_path: &Path) -> Result<BuildReport> {
+fn build_into(
+    cfg: &Config,
+    commit: &str,
+    tmp_path: &Path,
+    contextualize_override: Option<&dyn Provider>,
+    embed_override: Option<&dyn Provider>,
+) -> Result<BuildReport> {
+    // register the sqlite-vec extension before any connection in this build is opened
+    // (`sqlite3_auto_extension` only affects connections opened after the call); harmless to
+    // call again on every build (`Once`-guarded).
+    vectors::register_extension();
+    // the newest existing artifact, captured before this build writes anything: its
+    // embedding_cache and prefix_cache rows are copied forward below so a chunk whose hash is
+    // unchanged since that build is not re-embedded or re-prefixed (design.md §17.1).
+    let prev_artifact = newest_artifact(cfg);
+
     let root = &cfg.root;
     let docs = parse_docs_at(root, commit)?;
     let by_id: HashMap<String, &ParsedDoc> = docs.iter().map(|d| (d.id.clone(), d)).collect();
@@ -639,6 +693,13 @@ fn build_into(cfg: &Config, commit: &str, tmp_path: &Path) -> Result<BuildReport
     let captures = load_captures(&catalog_conn, cfg)?;
     let capture_drift = capture_drift_map(&catalog_conn)?;
     drop(catalog_conn);
+
+    // usage: reads and cites over the last 90 days, from `answer`/`search --record` events in the
+    // state database (design.md §17.3, §17.4). `usage_present` is false until the first event is
+    // ever written, which is when criticality::criticality_pct redistributes reads_90d/cites_90d's
+    // weight to the other three metrics; once any usage row exists, every canon document gets a
+    // real (possibly zero) count instead.
+    let (usage_present, usage_by_doc) = usage::aggregate_90d(cfg, chrono::Utc::now())?;
 
     let refs = build_refs(&docs, &by_id, &tombstone_ids, &capture_drift);
 
@@ -675,8 +736,8 @@ fn build_into(cfg: &Config, commit: &str, tmp_path: &Path) -> Result<BuildReport
         in_canon: canon_ids.iter().map(|id| in_canon.get(id).map(|s| s.len()).unwrap_or(0) as f64).collect(),
         in_code: canon_ids.iter().map(|_| 0.0).collect(),
         pagerank: canon_ids.iter().map(|id| *pagerank.get(id).unwrap_or(&0.0)).collect(),
-        reads: canon_ids.iter().map(|_| None).collect(),
-        cites: canon_ids.iter().map(|_| None).collect(),
+        reads: canon_ids.iter().map(|id| usage_present.then(|| usage_by_doc.get(id).map(|(r, _)| *r as f64).unwrap_or(0.0))).collect(),
+        cites: canon_ids.iter().map(|id| usage_present.then(|| usage_by_doc.get(id).map(|(_, c)| *c as f64).unwrap_or(0.0))).collect(),
     };
     let weights = criticality::Weights {
         in_canon: cfg.manifest.weights.in_canon,
@@ -687,12 +748,18 @@ fn build_into(cfg: &Config, commit: &str, tmp_path: &Path) -> Result<BuildReport
     };
     let mut pct_by_id: HashMap<String, f64> = HashMap::new();
     for doc in &docs {
+        let (reads_90d, cites_90d) = if usage_present {
+            let (r, c) = usage_by_doc.get(&doc.id).copied().unwrap_or((0, 0));
+            (Some(r as f64), Some(c as f64))
+        } else {
+            (None, None)
+        };
         let metrics = criticality::RawMetrics {
             in_canon: in_canon.get(&doc.id).map(|s| s.len()).unwrap_or(0) as f64,
             in_code: 0.0,
             pagerank: *pagerank.get(&doc.id).unwrap_or(&0.0),
-            reads_90d: None,
-            cites_90d: None,
+            reads_90d,
+            cites_90d,
         };
         pct_by_id.insert(doc.id.clone(), criticality::criticality_pct(&metrics, &canon_population, &weights));
     }
@@ -869,14 +936,17 @@ fn build_into(cfg: &Config, commit: &str, tmp_path: &Path) -> Result<BuildReport
             let mut gm_stmt = tx.prepare(
                 "insert into graph_metrics (doc_id, in_canon, in_code, out_degree, pagerank, reads_90d, cites_90d,
                     pct_in_canon, pct_in_code, pct_pagerank, pct_reads, pct_cites)
-                 values (?1,?2,0,?3,?4,0,0,0,0,0,0,0)",
+                 values (?1,?2,0,?3,?4,?5,?6,0,0,0,0,0)",
             )?;
             for doc in &docs {
+                let (reads_90d, cites_90d) = usage_by_doc.get(&doc.id).copied().unwrap_or((0, 0));
                 gm_stmt.execute(params![
                     doc.id,
                     in_canon.get(&doc.id).map(|s| s.len()).unwrap_or(0) as i64,
                     out_degree.get(&doc.id).map(|s| s.len()).unwrap_or(0) as i64,
                     *pagerank.get(&doc.id).unwrap_or(&0.0),
+                    reads_90d,
+                    cites_90d,
                 ])?;
             }
         }
@@ -910,6 +980,47 @@ fn build_into(cfg: &Config, commit: &str, tmp_path: &Path) -> Result<BuildReport
         tx.commit()?;
     }
 
+    // prefixes and embeddings (design.md §17.1, §19's `contextualize` and `embed` roles): seed
+    // the two caches forward from the newest previous artifact first, so an unchanged chunk hash
+    // is neither re-prefixed nor re-embedded, then generate prefixes for every chunk (fts
+    // benefits even with no provider, via the deterministic fallback) and embed only the
+    // canon/draft document chunks that are eligible for the vector table.
+    vectors::seed_caches_from_previous(&conn, prev_artifact.as_deref());
+    let owned_contextualize;
+    let contextualize_provider: Option<&dyn Provider> = match contextualize_override {
+        Some(p) => Some(p),
+        None => {
+            owned_contextualize = provider::provider_for_role(cfg, "contextualize")?;
+            owned_contextualize.as_deref()
+        }
+    };
+    let prefix_report = prefix::build_prefixes(&conn, cfg, contextualize_provider)?;
+
+    let owned_embed;
+    let embed_provider: Option<&dyn Provider> = match embed_override {
+        Some(p) => Some(p),
+        None => {
+            owned_embed = provider::provider_for_role(cfg, "embed")?;
+            owned_embed.as_deref()
+        }
+    };
+    let vector_report = vectors::build_vectors(&conn, cfg, embed_provider)?;
+    {
+        let mut meta_stmt = conn.prepare("insert into meta (key, value) values (?1,?2)")?;
+        meta_stmt.execute(params!["prefix_model", prefix_report.model])?;
+        meta_stmt.execute(params!["prefixes_generated", prefix_report.generated.to_string()])?;
+        meta_stmt.execute(params!["vectors_enabled", if vector_report.enabled && vector_report.chunk_count > 0 { "1" } else { "0" }])?;
+        meta_stmt.execute(params!["vector_backend", vector_report.backend])?;
+        meta_stmt.execute(params!["vector_dim", vector_report.dim.to_string()])?;
+        meta_stmt.execute(params!["vector_count", vector_report.chunk_count.to_string()])?;
+        if let Some(model) = &vector_report.model {
+            meta_stmt.execute(params!["embedding_model", model])?;
+        }
+        if let Some(reason) = &vector_report.skipped_reason {
+            meta_stmt.execute(params!["vectors_skip_reason", reason])?;
+        }
+    }
+
     let ok: String = conn.query_row("pragma integrity_check", [], |r| r.get(0))?;
     if ok != "ok" {
         bail!("index integrity check failed: {ok}");
@@ -932,6 +1043,9 @@ fn build_into(cfg: &Config, commit: &str, tmp_path: &Path) -> Result<BuildReport
         chunk_count,
         finding_count: (!hierarchy_cycle.is_empty() as usize) + (!succession_cycle.is_empty() as usize),
         maintenance_enabled,
+        vectors_enabled: vector_report.enabled && vector_report.chunk_count > 0,
+        vector_count: vector_report.chunk_count,
+        prefixes_generated: prefix_report.generated,
     })
 }
 

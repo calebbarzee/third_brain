@@ -130,6 +130,12 @@ pub fn last_commit_date(repo: &Path, path: &str) -> Option<String> {
     run(repo, &["log", "-1", "--format=%aI", "--", path]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// the sha of the newest commit touching `path`; the delete guard's backup precondition
+/// (design.md §17.4) compares this against `backup::manifest`'s last mirrored/bundled commits.
+pub fn last_commit_sha(repo: &Path, path: &str) -> Option<String> {
+    run(repo, &["log", "-1", "--format=%H", "--", path]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// initialize a repository for tests and fixtures with a fixed identity.
 pub fn init_for_tests(dir: &Path) -> Result<()> {
     run(dir, &["init", "-q", "-b", "main"])?;
@@ -141,6 +147,25 @@ pub fn init_for_tests(dir: &Path) -> Result<()> {
 pub fn commit_all(repo: &Path, message: &str) -> Result<String> {
     run(repo, &["add", "-A"])?;
     run(repo, &["commit", "-q", "-m", message, "--allow-empty"])?;
+    head(repo)
+}
+
+/// like `commit_all`, but with a fixed author and committer date (`GIT_AUTHOR_DATE` and
+/// `GIT_COMMITTER_DATE`); lets a test backdate a commit without touching the system clock.
+pub fn commit_all_dated(repo: &Path, message: &str, when_rfc3339: &str) -> Result<String> {
+    run(repo, &["add", "-A"])?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(NO_COLOR)
+        .args(["commit", "-q", "-m", message, "--allow-empty"])
+        .env("GIT_AUTHOR_DATE", when_rfc3339)
+        .env("GIT_COMMITTER_DATE", when_rfc3339)
+        .output()
+        .context("running git commit")?;
+    if !out.status.success() {
+        bail!("git commit failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
     head(repo)
 }
 
@@ -515,6 +540,154 @@ pub fn worktree_list_porcelain(repo: &Path) -> Result<String> {
     run(repo, &["worktree", "list", "--porcelain"])
 }
 
+// ---------------------------------------------------------------------------------------------
+// additions for `maintain` (nightly curation, compaction) and `backup`. design.md §15.3, §21.
+// ---------------------------------------------------------------------------------------------
+
+/// the last commit on `rev` at or before `before_rfc3339` (`git log --before`), or `None` when
+/// every commit on `rev` is newer than the cutoff (a young repository).
+pub fn rev_list_before(repo: &Path, rev: &str, before_rfc3339: &str) -> Result<Option<String>> {
+    let out = run(repo, &["log", "-1", "--format=%H", &format!("--before={before_rfc3339}"), rev])?;
+    let sha = out.trim();
+    Ok(if sha.is_empty() { None } else { Some(sha.to_string()) })
+}
+
+/// commit shas touching `docs/` in `since..until`, oldest first (matches the order a nightly
+/// pass wants to re-read: yesterday's earliest merge first).
+pub fn log_shas_since(repo: &Path, since: &str, until: &str) -> Result<Vec<String>> {
+    Ok(run(repo, &["log", "--reverse", "--format=%H", &format!("{since}..{until}"), "--", "docs/"])?
+        .lines()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+/// author name of one commit (`git log -1 --format=%an`), e.g. `agent:<skill>@<principal>` or a
+/// human name.
+pub fn commit_author(repo: &Path, rev: &str) -> Result<String> {
+    Ok(run(repo, &["log", "-1", "--format=%an", rev])?.trim().to_string())
+}
+
+/// the oldest commit that added `path` (`git log --diff-filter=A --follow`, last line of history),
+/// with its author and full message; `None` when the path has no history (deleted before any add
+/// landed, or never committed).
+pub fn creating_commit(repo: &Path, path: &str) -> Result<Option<(String, String, String)>> {
+    let out = run(repo, &["log", "--diff-filter=A", "--follow", "--format=%H", "--", path])?;
+    let Some(sha) = out.lines().rfind(|s| !s.is_empty()) else { return Ok(None) };
+    let author = commit_author(repo, sha)?;
+    let message = commit_message(repo, sha).unwrap_or_default();
+    Ok(Some((sha.to_string(), author, message)))
+}
+
+/// create an annotated tag `name` at `target`, dated by the commit (not `--force`; a name
+/// collision is an error, matching design.md §21's "never on `main`" spirit of not overwriting
+/// history markers).
+pub fn tag_annotated(repo: &Path, name: &str, target: &str, message: &str) -> Result<()> {
+    run(repo, &["tag", "-a", name, "-m", message, target])?;
+    Ok(())
+}
+
+/// true when tag `name` exists.
+pub fn tag_exists(repo: &Path, name: &str) -> bool {
+    rev_parse(repo, &format!("refs/tags/{name}")).map(|s| !s.is_empty()).unwrap_or(false)
+}
+
+/// the commit a tag (annotated or lightweight) points at.
+pub fn tag_commit(repo: &Path, name: &str) -> Result<String> {
+    rev_parse(repo, &format!("{name}^{{commit}}"))
+}
+
+/// `git init --bare` at an arbitrary path (not necessarily inside an existing repository, so this
+/// does not go through `run`'s `-C <repo>` wrapping).
+pub fn init_bare(path: &Path) -> Result<()> {
+    let out = Command::new("git").args(NO_COLOR).arg("init").arg("--bare").arg(path).output().context("running git init --bare")?;
+    if !out.status.success() {
+        bail!("git init --bare {} failed: {}", path.display(), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// `git push --mirror <remote>`: every ref, exactly as `repo` has it.
+pub fn push_mirror(repo: &Path, remote: &str) -> Result<()> {
+    run(repo, &["push", "--mirror", remote])?;
+    Ok(())
+}
+
+/// `git bundle create <out> <revs...>`.
+pub fn bundle_create(repo: &Path, out: &Path, revs: &[&str]) -> Result<()> {
+    let mut args = vec!["bundle", "create"];
+    let out_str = out.to_string_lossy().into_owned();
+    args.push(&out_str);
+    args.extend_from_slice(revs);
+    run(repo, &args)?;
+    Ok(())
+}
+
+/// `git bundle verify <bundle>`; the human-readable report on success.
+pub fn bundle_verify(repo: &Path, bundle: &Path) -> Result<String> {
+    run(repo, &["bundle", "verify", bundle.to_string_lossy().as_ref()])
+}
+
+/// `git clone <source> <dest>`, for a restore drill: `dest` must not yet be a repository, so this
+/// does not go through `run`'s `-C <repo>` wrapping.
+pub fn clone(source: &Path, dest: &Path) -> Result<()> {
+    let out = Command::new("git").args(NO_COLOR).arg("clone").arg(source).arg(dest).output().context("running git clone")?;
+    if !out.status.success() {
+        bail!("git clone {} {} failed: {}", source.display(), dest.display(), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// `git repack -adb`, falling back to `-ad` when the installed git rejects `-b` (bitmaps need a
+/// single-pack, non-shallow repository on some builds).
+pub fn repack(repo: &Path) -> Result<String> {
+    match run(repo, &["repack", "-adb"]) {
+        Ok(out) => Ok(out),
+        Err(_) => run(repo, &["repack", "-ad"]),
+    }
+}
+
+pub fn commit_graph_write_reachable(repo: &Path) -> Result<()> {
+    run(repo, &["commit-graph", "write", "--reachable"])?;
+    Ok(())
+}
+
+/// best-effort: an older git without `multi-pack-index` is not fatal to compaction.
+pub fn multi_pack_index_write(repo: &Path) -> Result<()> {
+    let _ = run(repo, &["multi-pack-index", "write"]);
+    Ok(())
+}
+
+pub fn gc_auto(repo: &Path) -> Result<()> {
+    run(repo, &["gc", "--auto"])?;
+    Ok(())
+}
+
+/// short names of `refs/heads/session/*` branches already merged into `target`, matched with
+/// `branches_merged`; deletes each local branch and its hidden base ref.
+pub fn branch_delete(repo: &Path, branch: &str) -> Result<()> {
+    run(repo, &["branch", "-d", branch])?;
+    Ok(())
+}
+
+/// the canonicalized common git directory (the shared `.git` every worktree of one repository
+/// points at). two paths return equal values here iff they belong to the same repository,
+/// worktrees included; used by `kb import` to decide whether `--move` can `git mv` a source file
+/// instead of copying it.
+pub fn common_dir(repo: &Path) -> Result<std::path::PathBuf> {
+    let raw = run(repo, &["rev-parse", "--git-common-dir"])?;
+    let raw = raw.trim();
+    let p = Path::new(raw);
+    let joined = if p.is_absolute() { p.to_path_buf() } else { repo.join(p) };
+    Ok(std::fs::canonicalize(&joined).unwrap_or(joined))
+}
+
+/// `git mv <from> <to>`, both paths relative to (or resolvable from) `repo`.
+pub fn mv(repo: &Path, from: &str, to: &str) -> Result<()> {
+    run(repo, &["mv", from, to])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,6 +720,23 @@ mod tests {
             let content = show_tree_path(dir.path(), tree.as_deref().unwrap(), "docs/a.md").unwrap();
             assert_eq!(content.unwrap(), b"two\n");
         }
+    }
+
+    #[test]
+    fn common_dir_matches_across_a_worktree_and_mv_moves_a_tracked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init_for_tests(dir.path()).unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/a.md"), "one\n").unwrap();
+        commit_all(dir.path(), "seed").unwrap();
+
+        let wt = dir.path().join(".wt");
+        run(dir.path(), &["worktree", "add", "-b", "side", &wt.display().to_string(), "main"]).unwrap();
+        assert_eq!(common_dir(dir.path()).unwrap(), common_dir(&wt).unwrap());
+
+        mv(&wt, "docs/a.md", "docs/b.md").unwrap();
+        assert!(!wt.join("docs/a.md").exists());
+        assert!(wt.join("docs/b.md").exists());
     }
 
     #[test]

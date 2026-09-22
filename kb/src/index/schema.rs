@@ -144,6 +144,20 @@ create table tombstones (
     superseded_by text
 );
 
+create table embedding_cache (
+    chunk_hash text not null,
+    embedding_model text not null,
+    embedding blob not null,
+    primary key (chunk_hash, embedding_model)
+);
+
+create table prefix_cache (
+    chunk_hash text not null,
+    prefix_model text not null,
+    prefix text not null,
+    primary key (chunk_hash, prefix_model)
+);
+
 create table findings (
     kind text not null,
     doc_ids text not null default '[]',

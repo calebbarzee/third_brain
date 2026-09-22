@@ -81,6 +81,23 @@ pub fn map_response(raw: Value) -> CompletionResponse {
     CompletionResponse { blocks, usage, stop_reason, raw }
 }
 
+/// build the `/api/embed` request body: `{model, input: [...]}`.
+pub fn build_embed_body(model: &str, inputs: &[String]) -> Value {
+    json!({ "model": model, "input": inputs })
+}
+
+/// map an `/api/embed` response body (`{"embeddings": [[...], ...]}`) into one vector per input,
+/// in order. pure so it can be unit-tested against fixture json without network.
+pub fn map_embed_response(raw: Value) -> Result<Vec<Vec<f32>>> {
+    let arr = raw["embeddings"].as_array().context("ollama embed response missing `embeddings` array")?;
+    arr.iter()
+        .map(|v| {
+            let inner = v.as_array().context("ollama embed response: an `embeddings` entry is not an array")?;
+            Ok(inner.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect())
+        })
+        .collect()
+}
+
 impl Provider for OllamaProvider {
     fn name(&self) -> &str {
         "ollama"
@@ -103,6 +120,29 @@ impl Provider for OllamaProvider {
         }
         let raw: Value = serde_json::from_str(&text).context("ollama response is not valid json")?;
         Ok(map_response(raw))
+    }
+
+    fn supports_embed(&self) -> bool {
+        true
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let body = build_embed_body(&self.model, texts);
+        let url = format!("{}/api/embed", self.base_url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .post(&url)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .context("ollama embed request failed to send")?;
+        let status = resp.status();
+        let text = resp.text().context("reading ollama embed response body")?;
+        if !status.is_success() {
+            bail!("ollama embed request failed: {status} {}", truncate(&text, 500));
+        }
+        let raw: Value = serde_json::from_str(&text).context("ollama embed response is not valid json")?;
+        map_embed_response(raw)
     }
 }
 
@@ -140,6 +180,23 @@ mod tests {
         };
         let body = build_body("llama3.2:3b", &req);
         assert_eq!(body["format"]["type"], "object");
+    }
+
+    #[test]
+    fn build_embed_body_sets_model_and_input() {
+        let body = build_embed_body("nomic-embed-text", &["a".to_string(), "b".to_string()]);
+        assert_eq!(body["model"], "nomic-embed-text");
+        assert_eq!(body["input"][0], "a");
+        assert_eq!(body["input"][1], "b");
+    }
+
+    #[test]
+    fn map_embed_response_reads_embeddings_array() {
+        let raw = json!({ "embeddings": [[0.1, 0.2], [0.3, 0.4]] });
+        let vecs = map_embed_response(raw).unwrap();
+        assert_eq!(vecs.len(), 2);
+        assert_eq!(vecs[0], vec![0.1_f32, 0.2_f32]);
+        assert_eq!(vecs[1], vec![0.3_f32, 0.4_f32]);
     }
 
     #[test]
@@ -193,5 +250,35 @@ mod tests {
             .unwrap();
         let text = super::super::first_text(&resp).unwrap_or_default();
         assert!(!text.is_empty(), "expected a non-empty text reply, got {resp:?}");
+    }
+
+    /// hits a local ollama server's `/api/embed` with a pulled embedding model. requires
+    /// KB_LIVE_PROVIDER_TESTS=1 and a running ollama with an embedding model pulled (set
+    /// KB_OLLAMA_EMBED_MODEL to override the default `nomic-embed-text`).
+    /// run with: KB_LIVE_PROVIDER_TESTS=1 cargo test -p kb --lib provider::ollama::tests::live_embed -- --ignored
+    #[test]
+    #[ignore = "hits a local ollama server; see the doc comment for how to run it"]
+    fn live_embed() {
+        if std::env::var("KB_LIVE_PROVIDER_TESTS").as_deref() != Ok("1") {
+            eprintln!("skipping: set KB_LIVE_PROVIDER_TESTS=1 to run");
+            return;
+        }
+        let cfg = ProviderConfig {
+            kind: "ollama".into(),
+            model: std::env::var("KB_OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "nomic-embed-text".into()),
+            base_url: None,
+            api_key_env: None,
+            max_tokens: None,
+        };
+        let provider = OllamaProvider::new(&cfg).unwrap();
+        let texts = vec!["first chunk".to_string(), "second chunk".to_string(), "third chunk".to_string()];
+        let vecs = provider.embed(&texts).unwrap();
+        assert_eq!(vecs.len(), 3);
+        let dim = vecs[0].len();
+        assert!(dim > 0, "expected a non-empty embedding vector");
+        for v in &vecs {
+            assert_eq!(v.len(), dim, "every embedding in a batch should share one dimension");
+        }
+        eprintln!("live_embed: model={} dim={dim}", cfg.model);
     }
 }

@@ -3,11 +3,13 @@ use crate::config::Config;
 use crate::git;
 use crate::index::build::{RefRow, open_newest};
 use crate::index::gitlog;
+use crate::index::vectors;
 use crate::model;
+use crate::provider::Provider;
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use std::collections::{HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// resolve a full ulid or a unique prefix to a document id.
@@ -63,17 +65,47 @@ fn responsible_for_doc(conn: &Connection, id: &str) -> Result<Vec<String>> {
 // search
 // ---------------------------------------------------------------------------------------------
 
+/// `fts` is bm25-only (the original, and still the default when no vector index exists);
+/// `hybrid` fuses fts and `vec0` results with reciprocal rank fusion; `vec` is vector-only.
+/// design.md §18.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMode {
+    Fts,
+    Hybrid,
+    Vec,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchOpts {
     pub limit: usize,
     pub status_any: bool,
     pub include_captures: bool,
+    /// `None` resolves to `Hybrid` when a query embedding is given and `chunk_vectors` exists in
+    /// this artifact, else `Fts` -- design.md §18's "default hybrid when vectors exist else fts".
+    pub mode: Option<SearchMode>,
+    /// attach per-hit fts rank, vec rank, and fused score to each result.
+    pub explain: bool,
 }
 
 impl Default for SearchOpts {
     fn default() -> Self {
-        Self { limit: 5, status_any: false, include_captures: false }
+        Self { limit: 5, status_any: false, include_captures: false, mode: None, explain: false }
     }
+}
+
+/// per-hit ranking detail, present on every hit when `SearchOpts.explain` is set.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchExplain {
+    /// 1-indexed rank in the fts5 bm25 top-20, `None` when the document did not appear there.
+    pub fts_rank: Option<usize>,
+    /// 1-indexed rank in the `vec0` top-20 (after cutting the raw top-80), `None` when the
+    /// document did not appear there or no vector search ran.
+    pub vec_rank: Option<usize>,
+    /// the reciprocal-rank-fusion score (`sum of 1/(k + rank)` over whichever of the two ranks
+    /// are present, `k = 60`); for fts-only or vec-only search this is just that one list's own
+    /// score, so the field is always populated once `explain` is requested.
+    pub fused_score: f64,
 }
 
 /// the handful of document columns a search hit decorates a chunk match with.
@@ -108,6 +140,17 @@ pub struct SearchHit {
     pub source_refs: Vec<RefRow>,
     pub code_refs: Vec<RefRow>,
     pub asset_refs: Vec<RefRow>,
+    /// per-hit fts/vec rank and fused score; `Some` only when `SearchOpts.explain` was set.
+    pub explain: Option<SearchExplain>,
+}
+
+/// one document's best-scoring chunk within one ranked list (fts or vec), before fusion.
+#[derive(Debug, Clone)]
+struct RankedCandidate {
+    doc_id: String,
+    heading_path: String,
+    snippet: String,
+    score: f64,
 }
 
 /// turn one raw whitespace-delimited token into an fts5 string literal, so it can never be read
@@ -166,10 +209,19 @@ fn run_fts_query(conn: &Connection, sql: &str, match_expr: &str, pool_limit: i64
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// fts5 bm25 search over the candidate chunk set, collapsed to the best-scoring chunk per document.
-/// candidates are `kind = 'document'` (plus `'capture'` when `include_captures`) and `status in
-/// (canon, draft)` unless `status_any` widens it to every status (design.md §18).
-pub fn search(conn: &Connection, query: &str, opts: &SearchOpts) -> Result<Vec<SearchHit>> {
+/// fts top-n per design.md §18 ("fts5 bm25 top 20").
+const FTS_TOP_N: usize = 20;
+/// vec0 raw top-n before cutting to `VEC_CUT_N` (design.md §18: "`vec0` top 80 ... cut to 20").
+const VEC_RAW_N: usize = 80;
+const VEC_CUT_N: usize = 20;
+/// reciprocal rank fusion constant (design.md §18: "reciprocal rank fusion with k of 60").
+const RRF_K: f64 = 60.0;
+
+/// fts5 bm25 search over the candidate chunk set, collapsed to the best-scoring chunk per
+/// document, sorted descending, truncated to `top_n`. candidates are `kind = 'document'` (plus
+/// `'capture'` when `include_captures`) and `status in (canon, draft)` unless `status_any` widens
+/// it to every status (design.md §18).
+fn fts_candidates(conn: &Connection, query: &str, opts: &SearchOpts, top_n: usize) -> Result<Vec<RankedCandidate>> {
     let kind_clause = if opts.include_captures { "c.kind in ('document','capture')" } else { "c.kind = 'document'" };
     let status_clause = if opts.status_any { "1 = 1" } else { "c.status in ('canon','draft')" };
     let sql = format!(
@@ -179,9 +231,9 @@ pub fn search(conn: &Connection, query: &str, opts: &SearchOpts) -> Result<Vec<S
          order by score
          limit ?2"
     );
-    // fetch a wider pool than the final limit so collapsing to one chunk per document still leaves
-    // `limit` distinct documents.
-    let pool_limit = (opts.limit.max(1) * 20) as i64;
+    // fetch a wider pool than top_n so collapsing to one chunk per document still leaves top_n
+    // distinct documents.
+    let pool_limit = (top_n.max(1) * 20) as i64;
 
     // never hand the user's raw text straight to fts5's own query syntax: sanitize it into safe
     // string-literal tokens first, and if that still fails to parse (an unbalanced quote, say),
@@ -197,24 +249,159 @@ pub fn search(conn: &Connection, query: &str, opts: &SearchOpts) -> Result<Vec<S
     };
 
     // lower (more negative) bm25 is a better match; collapse to the best chunk per document.
-    let mut best: std::collections::HashMap<String, (String, f64, String)> = std::collections::HashMap::new();
+    let mut best: HashMap<String, RankedCandidate> = HashMap::new();
     for (doc_id, heading_path, bm25, snip) in rows {
         let score = -bm25;
-        best.entry(doc_id).and_modify(|slot| {
-            if score > slot.1 {
-                *slot = (heading_path.clone(), score, snip.clone());
-            }
-        }).or_insert((heading_path, score, snip));
+        best.entry(doc_id.clone())
+            .and_modify(|slot| {
+                if score > slot.score {
+                    slot.heading_path = heading_path.clone();
+                    slot.snippet = snip.clone();
+                    slot.score = score;
+                }
+            })
+            .or_insert(RankedCandidate { doc_id, heading_path, snippet: snip, score });
     }
-    let mut ranked: Vec<(String, (String, f64, String))> = best.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.1.partial_cmp(&a.1.1).unwrap_or(std::cmp::Ordering::Equal));
-    ranked.truncate(opts.limit);
+    let mut ranked: Vec<RankedCandidate> = best.into_values().collect();
+    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(top_n);
+    Ok(ranked)
+}
 
-    let mut hits = Vec::with_capacity(ranked.len());
-    for (doc_id, (heading_path, score, snippet)) in ranked {
-        let snippet: String = if snippet.chars().count() > 300 { snippet.chars().take(300).collect::<String>() + "…" } else { snippet };
-        let summary: DocSummary =
-            conn.query_row("select title, layer, status, kind, path, criticality_pct, last_updated from documents where id = ?1", params![doc_id], |r| {
+/// `chunk_vectors` knn search, collapsed to the best-scoring chunk per document, sorted
+/// descending, cut to `VEC_CUT_N` after the raw `VEC_RAW_N` query (design.md §18). `chunk_vectors`
+/// only ever holds `kind = 'document'`, `status in (canon, draft)` chunks (design.md §17.1), so no
+/// extra filtering is needed here -- this is also why `status_any` has no vector-search effect
+/// (design.md §18: "status=any ... fts only, since they leave the vector table").
+fn vec_candidates(conn: &Connection, query_vec: &[f32]) -> Result<Vec<RankedCandidate>> {
+    let hits = vectors::nearest(conn, query_vec, VEC_RAW_N, "")?;
+    let mut best: HashMap<String, RankedCandidate> = HashMap::new();
+    for (chunk_id, score) in hits {
+        let row: Option<(String, String, String)> =
+            conn.query_row("select doc_id, heading_path, text from chunks where chunk_id = ?1", params![chunk_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()?;
+        let Some((doc_id, heading_path, text)) = row else { continue };
+        let snippet: String = if text.chars().count() > 300 { text.chars().take(300).collect::<String>() + "…" } else { text };
+        best.entry(doc_id.clone())
+            .and_modify(|slot| {
+                if score > slot.score {
+                    slot.heading_path = heading_path.clone();
+                    slot.snippet = snippet.clone();
+                    slot.score = score;
+                }
+            })
+            .or_insert(RankedCandidate { doc_id, heading_path, snippet, score });
+    }
+    let mut ranked: Vec<RankedCandidate> = best.into_values().collect();
+    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(VEC_CUT_N);
+    Ok(ranked)
+}
+
+/// one document's fused ranking: its rank (1-indexed) in each list it appeared in, its fused rrf
+/// score, and the display fields (heading path, snippet) taken from whichever list ranked it
+/// higher -- an fts hit's bm25 snippet is more informative than a raw text excerpt, so fts wins
+/// ties.
+struct Fused {
+    heading_path: String,
+    snippet: String,
+    fts_rank: Option<usize>,
+    vec_rank: Option<usize>,
+    fused_score: f64,
+}
+
+fn rrf_fuse(fts: &[RankedCandidate], vec: &[RankedCandidate]) -> Vec<(String, Fused)> {
+    let mut fused: HashMap<String, Fused> = HashMap::new();
+    for (i, c) in fts.iter().enumerate() {
+        let rank = i + 1;
+        let entry = fused.entry(c.doc_id.clone()).or_insert(Fused {
+            heading_path: c.heading_path.clone(),
+            snippet: c.snippet.clone(),
+            fts_rank: None,
+            vec_rank: None,
+            fused_score: 0.0,
+        });
+        entry.fts_rank = Some(rank);
+        entry.fused_score += 1.0 / (RRF_K + rank as f64);
+    }
+    for (i, c) in vec.iter().enumerate() {
+        let rank = i + 1;
+        let entry = fused.entry(c.doc_id.clone()).or_insert(Fused {
+            heading_path: c.heading_path.clone(),
+            snippet: c.snippet.clone(),
+            fts_rank: None,
+            vec_rank: None,
+            fused_score: 0.0,
+        });
+        entry.vec_rank = Some(rank);
+        entry.fused_score += 1.0 / (RRF_K + rank as f64);
+    }
+    let mut out: Vec<(String, Fused)> = fused.into_iter().collect();
+    out.sort_by(|a, b| b.1.fused_score.partial_cmp(&a.1.fused_score).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// hybrid search over one artifact (design.md §18): fts5 bm25, `vec0` nearest-neighbor when a
+/// query embedding and a vector index are both available, reciprocal rank fusion, an optional
+/// cross-encoder rerank when the given provider supports it (none do yet -- design.md §32), and
+/// per-document collapse throughout. `query_vec` is the caller's own embedding of `query` (this
+/// function never calls a provider itself, so search stays usable with no embed role configured);
+/// pass `None` to force fts-only regardless of `opts.mode`. `rerank` is the provider configured
+/// for the `rerank` role, if any; passing a provider that does not support it is a no-op, not an
+/// error (`Provider::supports_rerank`).
+pub fn search(conn: &Connection, query: &str, opts: &SearchOpts, query_vec: Option<&[f32]>, rerank: Option<&dyn Provider>) -> Result<Vec<SearchHit>> {
+    let vectors_exist = vectors::vector_table_exists(conn);
+    let mode = opts.mode.unwrap_or(if vectors_exist && query_vec.is_some() { SearchMode::Hybrid } else { SearchMode::Fts });
+    // a mode that needs vectors but has none available (no query embedding, or no vector index in
+    // this artifact) degrades to fts rather than failing outright.
+    let effective_mode = if matches!(mode, SearchMode::Hybrid | SearchMode::Vec) && (!vectors_exist || query_vec.is_none()) {
+        SearchMode::Fts
+    } else {
+        mode
+    };
+
+    let (mut doc_ids_in_order, fused_by_doc): (Vec<String>, HashMap<String, Fused>) = match effective_mode {
+        SearchMode::Fts => {
+            let ranked = fts_candidates(conn, query, opts, opts.limit.max(FTS_TOP_N))?;
+            let ids = ranked.iter().map(|c| c.doc_id.clone()).collect();
+            let map = ranked
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    (c.doc_id, Fused { heading_path: c.heading_path, snippet: c.snippet, fts_rank: Some(i + 1), vec_rank: None, fused_score: c.score })
+                })
+                .collect();
+            (ids, map)
+        }
+        SearchMode::Vec => {
+            let ranked = vec_candidates(conn, query_vec.unwrap())?;
+            let ids = ranked.iter().map(|c| c.doc_id.clone()).collect();
+            let map = ranked
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    (c.doc_id, Fused { heading_path: c.heading_path, snippet: c.snippet, fts_rank: None, vec_rank: Some(i + 1), fused_score: c.score })
+                })
+                .collect();
+            (ids, map)
+        }
+        SearchMode::Hybrid => {
+            let fts = fts_candidates(conn, query, opts, FTS_TOP_N)?;
+            let vec = vec_candidates(conn, query_vec.unwrap())?;
+            let fused = rrf_fuse(&fts, &vec);
+            let ids = fused.iter().map(|(id, _)| id.clone()).collect();
+            (ids, fused.into_iter().collect())
+        }
+    };
+    doc_ids_in_order.truncate(opts.limit.max(1) * 4); // headroom for a rerank step, cut again below
+
+    let mut hits = Vec::with_capacity(doc_ids_in_order.len());
+    for doc_id in &doc_ids_in_order {
+        let Some(fused) = fused_by_doc.get(doc_id) else { continue };
+        let summary: Option<DocSummary> = conn
+            .query_row("select title, layer, status, kind, path, criticality_pct, last_updated from documents where id = ?1", params![doc_id], |r| {
                 Ok(DocSummary {
                     title: r.get(0)?,
                     layer: r.get(1)?,
@@ -224,32 +411,52 @@ pub fn search(conn: &Connection, query: &str, opts: &SearchOpts) -> Result<Vec<S
                     criticality_pct: r.get(5)?,
                     last_updated: r.get(6)?,
                 })
-            })?;
-        let DocSummary { title, layer, status, kind, path, criticality_pct, last_updated } = summary;
+            })
+            .optional()?;
+        let Some(DocSummary { title, layer, status, kind, path, criticality_pct, last_updated }) = summary else { continue };
         let source_uri = if kind == "capture" { Some(path) } else { None };
-        let all_refs = refs_out(conn, &doc_id)?;
+        let all_refs = refs_out(conn, doc_id)?;
         let source_refs = all_refs.iter().filter(|r| r.rel == "source").cloned().collect();
         let code_refs = all_refs.iter().filter(|r| r.rel == "code").cloned().collect();
         let asset_refs = all_refs.iter().filter(|r| r.rel == "asset").cloned().collect();
-        let responsible = responsible_for_doc(conn, &doc_id)?;
+        let responsible = responsible_for_doc(conn, doc_id)?;
+        let explain = opts.explain.then_some(SearchExplain { fts_rank: fused.fts_rank, vec_rank: fused.vec_rank, fused_score: fused.fused_score });
         hits.push(SearchHit {
-            doc_id,
+            doc_id: doc_id.clone(),
             title,
             layer,
             status,
             kind,
             source_uri,
             criticality_pct,
-            heading_path,
-            snippet,
-            score,
+            heading_path: fused.heading_path.clone(),
+            snippet: fused.snippet.clone(),
+            score: fused.fused_score,
             last_updated,
             responsible,
             source_refs,
             code_refs,
             asset_refs,
+            explain,
         });
     }
+
+    // cross-encoder rerank of the top of the pool when the configured provider supports it
+    // (design.md §18); no adapter implements it yet (`supports_rerank` always false today), so
+    // this is dead code in practice until one does -- see design.md §32.
+    if let Some(provider) = rerank
+        && provider.supports_rerank()
+        && !hits.is_empty()
+    {
+        let texts: Vec<String> = hits.iter().map(|h| h.snippet.clone()).collect();
+        if let Ok(scores) = provider.rerank(query, &texts) {
+            let mut scored: Vec<(f64, SearchHit)> = hits.into_iter().zip(scores).map(|(h, s)| (s, h)).collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            hits = scored.into_iter().map(|(_, h)| h).collect();
+        }
+    }
+
+    hits.truncate(opts.limit);
     Ok(hits)
 }
 
@@ -697,5 +904,73 @@ fn dirty_state(cfg: &Config, path: &str) -> Result<(String, Option<String>)> {
         Ok(("uncommitted".to_string(), iso))
     } else {
         Ok(("committed".to_string(), git::last_commit_date(&cfg.root, path)))
+    }
+}
+
+#[cfg(test)]
+mod hybrid_tests {
+    use super::*;
+
+    fn cand(doc_id: &str, score: f64) -> RankedCandidate {
+        RankedCandidate { doc_id: doc_id.to_string(), heading_path: "_body".to_string(), snippet: "snip".to_string(), score }
+    }
+
+    #[test]
+    fn rrf_favors_a_document_ranked_high_in_both_lists() {
+        // "a" is #1 fts, #2 vec; "b" is #2 fts, #1 vec; "c" is fts-only, rank 3.
+        let fts = vec![cand("a", 10.0), cand("b", 8.0), cand("c", 6.0)];
+        let vec = vec![cand("b", 0.9), cand("a", 0.8)];
+        let fused = rrf_fuse(&fts, &vec);
+        let ids: Vec<&str> = fused.iter().map(|(id, _)| id.as_str()).collect();
+        // a: 1/(60+1) + 1/(60+2) = 0.032514; b: 1/(60+2) + 1/(60+1) = same total (order differs
+        // only in which list ranked which #1), so a and b tie exactly and beat c.
+        assert!(ids[0] == "a" || ids[0] == "b");
+        assert!(ids[1] == "a" || ids[1] == "b");
+        assert_eq!(ids[2], "c", "fts-only rank-3 document should fuse to last");
+
+        let a = &fused.iter().find(|(id, _)| id == "a").unwrap().1;
+        let b = &fused.iter().find(|(id, _)| id == "b").unwrap().1;
+        assert!((a.fused_score - b.fused_score).abs() < 1e-12, "a and b should tie: {} vs {}", a.fused_score, b.fused_score);
+        let c = &fused.iter().find(|(id, _)| id == "c").unwrap().1;
+        assert!(a.fused_score > c.fused_score);
+        assert_eq!(c.vec_rank, None);
+        assert_eq!(c.fts_rank, Some(3));
+    }
+
+    #[test]
+    fn rrf_matches_the_k_60_formula_exactly() {
+        let fts = vec![cand("only-fts", 1.0)];
+        let vec = vec![cand("only-vec", 1.0)];
+        let fused = rrf_fuse(&fts, &vec);
+        for (id, f) in &fused {
+            let expected = 1.0 / (RRF_K + 1.0);
+            assert!((f.fused_score - expected).abs() < 1e-12, "{id}: {} vs {expected}", f.fused_score);
+        }
+    }
+
+    #[test]
+    fn rrf_of_empty_lists_is_empty() {
+        let fused = rrf_fuse(&[], &[]);
+        assert!(fused.is_empty());
+    }
+
+    #[test]
+    fn search_mode_defaults_to_fts_without_a_query_vector() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::index::schema::create_schema(&conn).unwrap();
+        conn.execute(
+            "insert into documents (id, kind, path, title, status) values ('d1', 'document', 'docs/d1.md', 'hello world', 'canon')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into chunks (chunk_hash, doc_id, kind, status, heading_path, ordinal, text) values ('h1','d1','document','canon','_body',0,'hello world')",
+            [],
+        )
+        .unwrap();
+        let opts = SearchOpts::default();
+        let hits = search(&conn, "hello", &opts, None, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc_id, "d1");
     }
 }
