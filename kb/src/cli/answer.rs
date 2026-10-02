@@ -60,7 +60,7 @@ fn print_metrics_table(rows: &[(&str, eval::EvalMetrics)]) {
 pub fn run(cfg: &Config, cmd: AnswerCommand, json: bool) -> Result<i32> {
     match cmd {
         AnswerCommand::Ask { question, limit, include_captures, no_record } => {
-            let opts = AnswerOpts { limit, include_captures, record: !no_record };
+            let opts = AnswerOpts { limit, include_captures, record: !no_record, readable: None };
             let result = answer::answer(cfg, &question, &opts)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);

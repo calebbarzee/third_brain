@@ -26,11 +26,13 @@ pub struct AnswerOpts {
     /// write `read`/`cite` usage events (design.md §17.3, §17.4). default `true`; the cli's
     /// `--no-record` flag turns this off.
     pub record: bool,
+    /// when set, only these document and capture ids may be passages (design.md §10 `access.read`).
+    pub readable: Option<std::collections::HashSet<String>>,
 }
 
 impl Default for AnswerOpts {
     fn default() -> Self {
-        Self { limit: 5, include_captures: false, record: true }
+        Self { limit: 5, include_captures: false, record: true, readable: None }
     }
 }
 
@@ -176,8 +178,13 @@ pub fn answer_with_provider(cfg: &Config, question: &str, opts: &AnswerOpts, pro
         _ => None,
     };
     let rerank_provider = provider::provider_for_role(cfg, "rerank")?;
-    let search_opts = SearchOpts { limit: opts.limit, status_any: false, include_captures: opts.include_captures, mode: None, explain: false };
+    let fetch = if opts.readable.is_some() { opts.limit * 4 } else { opts.limit };
+    let search_opts = SearchOpts { limit: fetch, status_any: false, include_captures: opts.include_captures, mode: None, explain: false };
     let mut hits = index::search(&conn, question, &search_opts, query_vec.as_deref(), rerank_provider.as_deref())?;
+    if let Some(readable) = &opts.readable {
+        hits.retain(|h| readable.contains(&h.doc_id));
+        hits.truncate(opts.limit);
+    }
     // the model answers from full passages, not the short display snippet (capped to keep the
     // prompt bounded; a chunk is one heading-bounded section)
     for hit in &mut hits {

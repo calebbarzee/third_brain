@@ -77,6 +77,9 @@ impl BlobStore for LocalBlobStore {
     }
 
     fn get(&self, sha: &str) -> Result<Option<Vec<u8>>> {
+        if !is_sha256_hex(sha) {
+            return Ok(None);
+        }
         let p = self.blob_path(sha);
         if !p.is_file() {
             return Ok(None);
@@ -85,13 +88,22 @@ impl BlobStore for LocalBlobStore {
     }
 
     fn exists(&self, sha: &str) -> Result<bool> {
-        Ok(self.blob_path(sha).is_file())
+        Ok(is_sha256_hex(sha) && self.blob_path(sha).is_file())
     }
 
     fn path(&self, sha: &str) -> Option<PathBuf> {
+        if !is_sha256_hex(sha) {
+            return None;
+        }
         let p = self.blob_path(sha);
         p.is_file().then_some(p)
     }
+}
+
+/// a blob address: exactly 64 lowercase hex characters. anything else (a `/`, `..`, a multibyte
+/// character) never reaches a path join or a byte slice.
+pub fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// `<repo root>/<cfg.kb.store.path>`, the root of the content store (blobs/, quarantine/ live under it).
@@ -111,7 +123,9 @@ pub fn open_store(cfg: &Config) -> Result<Box<dyn BlobStore>> {
 /// path of a quarantined blob: `<store>/quarantine/<sha256>`, flat (no shard directory), since a
 /// quarantined item is reviewed and released or discarded by hand rather than addressed at scale.
 pub fn quarantine_path(cfg: &Config, sha: &str) -> PathBuf {
-    store_root(cfg).join("quarantine").join(sha)
+    // a non-hash name maps to a fixed path that never holds a file
+    let name = if is_sha256_hex(sha) { sha } else { "invalid" };
+    store_root(cfg).join("quarantine").join(name)
 }
 
 /// write `bytes` into quarantine under their own hash. does not check the hash against `sha`;
@@ -144,6 +158,9 @@ pub fn remove_quarantine(cfg: &Config, sha: &str) -> Result<()> {
 
 /// the recorded media type for a blob, if the sidecar file is present.
 pub fn media_type_of(root: &Path, sha: &str) -> Option<String> {
+    if !is_sha256_hex(sha) {
+        return None;
+    }
     let shard = &sha[..2.min(sha.len())];
     fs::read_to_string(root.join(shard).join(format!("{sha}.type"))).ok()
 }
@@ -151,6 +168,22 @@ pub fn media_type_of(root: &Path, sha: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_hash_addresses_never_reach_the_filesystem() {
+        let (dir, cfg) = cfg();
+        let store = open_store(&cfg).unwrap();
+        std::fs::create_dir_all(store_root(&cfg).join("blobs")).unwrap();
+        std::fs::write(dir.path().join("kb.toml.secret"), "x").unwrap();
+        for bad in ["/etc/hostname", "../state.sqlite", "..%2F..%2Fkb.toml", "\u{20ac}abc", "€abc", "ABCDEF", &"a".repeat(63)] {
+            assert!(store.get(bad).unwrap().is_none(), "{bad}");
+            assert!(!store.exists(bad).unwrap(), "{bad}");
+            assert!(store.path(bad).is_none(), "{bad}");
+            assert!(media_type_of(&store_root(&cfg).join("blobs"), bad).is_none(), "{bad}");
+        }
+        let sha = store.put(b"hello", "text/plain").unwrap();
+        assert_eq!(store.get(&sha).unwrap().as_deref(), Some(&b"hello"[..]));
+    }
 
     fn cfg() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().unwrap();

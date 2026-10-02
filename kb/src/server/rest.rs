@@ -26,6 +26,17 @@ pub fn handle(cfg: &Config, mode: &AuthMode, request: Request) -> (u16, String) 
     let url = request.url().to_string();
     let (path, query) = split_query(&url);
 
+    if request.body_length().is_some_and(|n| n > MAX_BODY_BYTES) {
+        let status = respond_json(request, 413, json!({"error": format!("request body over {MAX_BODY_BYTES} bytes")}));
+        return (status, "-".to_string());
+    }
+    if let AuthMode::NoAuth(_) = mode
+        && let Err(reason) = check_loopback_request(&method, &request)
+    {
+        let status = respond_json(request, 403, json!({"error": reason}));
+        return (status, "-".to_string());
+    }
+
     let principal = match authenticate(cfg, mode, &request) {
         Some(p) => p,
         None => {
@@ -36,6 +47,50 @@ pub fn handle(cfg: &Config, mode: &AuthMode, request: Request) -> (u16, String) 
 
     let status = route(cfg, &principal, &method, &path, &query, request);
     (status, principal)
+}
+
+/// largest request body read; a larger declared body is refused with 413, and a chunked body is
+/// cut at this size (and then fails to parse).
+const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+fn header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+    request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name)).map(|h| h.value.as_str())
+}
+
+/// the host part of a `Host` header or an origin url: `localhost:7777` and `http://localhost:7777`
+/// both give `localhost`; `[::1]:7777` gives `[::1]`.
+fn host_part(value: &str) -> &str {
+    let rest = value.split_once("://").map_or(value, |(_, r)| r);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    if authority.starts_with('[') {
+        authority.split_inclusive(']').next().unwrap_or(authority)
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+}
+
+/// `--no-auth` serves anyone who can reach 127.0.0.1, which includes web pages in the user's own
+/// browser. a page cannot forge `Host` past dns rebinding checks or send `Content-Type:
+/// application/json` cross-origin without a preflight this server never answers, so: the `Host`
+/// must be loopback, an `Origin`, when sent, must be loopback, and a POST must be json.
+fn check_loopback_request(method: &str, request: &Request) -> std::result::Result<(), String> {
+    let host = header(request, "host").ok_or("missing Host header")?;
+    if !is_loopback_host(host_part(host)) {
+        return Err(format!("Host `{host}` is not a loopback name; --no-auth serves only localhost"));
+    }
+    if let Some(origin) = header(request, "origin")
+        && !is_loopback_host(host_part(origin))
+    {
+        return Err(format!("Origin `{origin}` is not a loopback origin"));
+    }
+    if method == "POST" && !header(request, "content-type").is_some_and(|c| c.trim_start().to_ascii_lowercase().starts_with("application/json")) {
+        return Err("POST requires Content-Type: application/json".to_string());
+    }
+    Ok(())
 }
 
 /// `Authorization: Bearer <token>` resolved through `auth::verify`, or (in `--no-auth` mode) the
@@ -54,17 +109,18 @@ fn authenticate(cfg: &Config, mode: &AuthMode, request: &Request) -> Option<Stri
 fn route(cfg: &Config, principal: &str, method: &str, path: &str, query: &HashMap<String, String>, request: Request) -> u16 {
     let decoded: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
     let seg: Vec<&str> = decoded.iter().map(String::as_str).collect();
+    let reader = handlers::Reader::new(cfg, principal);
     match (method, seg.as_slice()) {
         ("GET", ["health"]) => respond_json(request, 200, json!({"status": "ok"})),
-        ("GET", ["search"]) => respond_search(cfg, query, request),
-        ("GET", ["doc", id]) => respond_get(cfg, id, request),
-        ("GET", ["doc", id, "refs"]) => respond_refs(cfg, id, query, request),
-        ("GET", ["docs"]) => respond_docs(cfg, query, request),
+        ("GET", ["search"]) => respond_search(cfg, &reader, query, request),
+        ("GET", ["doc", id]) => respond_get(cfg, &reader, id, request),
+        ("GET", ["doc", id, "refs"]) => respond_refs(cfg, &reader, id, query, request),
+        ("GET", ["docs"]) => respond_docs(cfg, &reader, query, request),
         ("POST", ["propose"]) => respond_propose(cfg, principal, request),
-        ("POST", ["answer"]) => respond_answer(cfg, request),
+        ("POST", ["answer"]) => respond_answer(cfg, &reader, request),
         ("GET", ["runs"]) => respond_runs(cfg, query, request),
         ("GET", ["run", id]) => respond_run(cfg, principal, id, request),
-        ("GET", ["blob", sha]) => respond_blob(cfg, sha, request),
+        ("GET", ["blob", sha]) => respond_blob(cfg, &reader, sha, request),
         ("GET", ["review"]) => respond_review(cfg, request),
         ("POST", ["webhook", "main-advanced"]) => respond_webhook_tick(cfg, request),
         ("POST", ["webhook", "source", name]) => respond_webhook_source(cfg, name, request),
@@ -73,7 +129,7 @@ fn route(cfg: &Config, principal: &str, method: &str, path: &str, query: &HashMa
     }
 }
 
-fn respond_search(cfg: &Config, query: &HashMap<String, String>, request: Request) -> u16 {
+fn respond_search(cfg: &Config, reader: &handlers::Reader, query: &HashMap<String, String>, request: Request) -> u16 {
     let Some(q) = query.get("q") else {
         return respond_json(request, 400, json!({"error": "missing required query parameter `q`"}));
     };
@@ -84,33 +140,33 @@ fn respond_search(cfg: &Config, query: &HashMap<String, String>, request: Reques
         mode: handlers::parse_search_mode(query.get("mode").map(String::as_str)),
         explain: query.get("explain").map(|v| v == "true" || v == "1").unwrap_or(false),
     };
-    match handlers::search(cfg, q, &opts) {
+    match handlers::search(cfg, reader, q, &opts) {
         Ok(v) => respond_json(request, 200, v),
         Err(e) => respond_json(request, 500, json!({"error": format!("{e:#}")})),
     }
 }
 
-fn respond_get(cfg: &Config, id: &str, request: Request) -> u16 {
-    match handlers::get(cfg, id) {
+fn respond_get(cfg: &Config, reader: &handlers::Reader, id: &str, request: Request) -> u16 {
+    match handlers::get(cfg, reader, id) {
         Ok(Some(v)) => respond_json(request, 200, v),
         Ok(None) => respond_json(request, 404, json!({"error": format!("no document matches `{id}`")})),
         Err(e) => respond_json(request, 400, json!({"error": format!("{e:#}")})),
     }
 }
 
-fn respond_refs(cfg: &Config, id: &str, query: &HashMap<String, String>, request: Request) -> u16 {
+fn respond_refs(cfg: &Config, reader: &handlers::Reader, id: &str, query: &HashMap<String, String>, request: Request) -> u16 {
     let incoming = query.get("incoming").map(|v| v == "true" || v == "1").unwrap_or(false);
     let depth = query.get("depth").and_then(|v| v.parse().ok()).unwrap_or(1);
-    match handlers::refs(cfg, id, incoming, depth) {
+    match handlers::refs(cfg, reader, id, incoming, depth) {
         Ok(v) => respond_json(request, 200, v),
         Err(e) => respond_json(request, 400, json!({"error": format!("{e:#}")})),
     }
 }
 
-fn respond_docs(cfg: &Config, query: &HashMap<String, String>, request: Request) -> u16 {
+fn respond_docs(cfg: &Config, reader: &handlers::Reader, query: &HashMap<String, String>, request: Request) -> u16 {
     let filter =
         LsFilter { layer: query.get("layer").cloned(), status: query.get("status").cloned(), tag: query.get("tag").cloned(), kind: query.get("kind").cloned() };
-    match handlers::docs_list(cfg, &filter) {
+    match handlers::docs_list(cfg, reader, &filter) {
         Ok(v) => respond_json(request, 200, v),
         Err(e) => respond_json(request, 500, json!({"error": format!("{e:#}")})),
     }
@@ -149,11 +205,11 @@ fn default_answer_limit() -> usize {
     5
 }
 
-fn respond_answer(cfg: &Config, mut request: Request) -> u16 {
+fn respond_answer(cfg: &Config, reader: &handlers::Reader, mut request: Request) -> u16 {
     let body = read_body(&mut request);
     let parsed: Result<AnswerBody, _> = serde_json::from_slice(&body);
     match parsed {
-        Ok(b) => match handlers::answer(cfg, &b.question, b.limit) {
+        Ok(b) => match handlers::answer(cfg, reader, &b.question, b.limit) {
             Ok(v) => respond_json(request, 200, v),
             Err(e) => respond_json(request, 500, json!({"error": format!("{e:#}")})),
         },
@@ -177,7 +233,10 @@ fn respond_run(cfg: &Config, principal: &str, id: &str, request: Request) -> u16
     }
 }
 
-fn respond_blob(cfg: &Config, sha: &str, request: Request) -> u16 {
+fn respond_blob(cfg: &Config, reader: &handlers::Reader, sha: &str, request: Request) -> u16 {
+    if !crate::store::blob::is_sha256_hex(sha) || !handlers::blob_readable(cfg, reader, sha).unwrap_or(false) {
+        return respond_json(request, 404, json!({"error": format!("no blob `{sha}`")}));
+    }
     let store = match crate::store::blob::open_store(cfg) {
         Ok(s) => s,
         Err(e) => return respond_json(request, 500, json!({"error": format!("{e:#}")})),
@@ -267,7 +326,7 @@ fn respond_empty(request: Request, status: u16) -> u16 {
 
 fn read_body(request: &mut Request) -> Vec<u8> {
     let mut buf = Vec::new();
-    let _ = request.as_reader().read_to_end(&mut buf);
+    let _ = std::io::Read::read_to_end(&mut std::io::Read::take(request.as_reader(), MAX_BODY_BYTES as u64), &mut buf);
     buf
 }
 

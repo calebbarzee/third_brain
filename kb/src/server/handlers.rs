@@ -18,13 +18,102 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
 
+/// who is reading, for `access.read` (design.md §10). in single-user mode (groups.toml lists no
+/// principals) every document is readable, as every write is allowed; otherwise a document is
+/// readable when its read list names `*`, the principal, one of its groups, or `owner` and the
+/// principal owns it. a capture uses its catalog row's `access_json` read list the same way.
+pub struct Reader {
+    principal: String,
+    groups: Vec<String>,
+    unrestricted: bool,
+}
+
+impl Reader {
+    pub fn new(cfg: &Config, principal: &str) -> Self {
+        Self { principal: principal.to_string(), groups: cfg.groups_of(principal), unrestricted: cfg.groups.principals.is_empty() }
+    }
+
+    fn allows(&self, read: &[String], owner: Option<&str>) -> bool {
+        read.iter().any(|g| g == "*" || g == &self.principal || self.groups.contains(g) || (g == "owner" && owner == Some(self.principal.as_str())))
+    }
+
+    /// every readable document and capture id, or `None` when nothing is restricted.
+    pub fn readable_ids(&self, cfg: &Config, conn: &Connection) -> Result<Option<std::collections::HashSet<String>>> {
+        if self.unrestricted {
+            return Ok(None);
+        }
+        let capture_reads = capture_read_lists(cfg);
+        let mut out = std::collections::HashSet::new();
+        let mut stmt = conn.prepare("select id, kind, read_groups, owner from documents")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?)))?;
+        for row in rows {
+            let (id, kind, read_groups, owner) = row?;
+            let read: Vec<String> = if kind == "capture" {
+                capture_reads.get(&id).cloned().unwrap_or_else(|| vec!["*".to_string()])
+            } else {
+                serde_json::from_str(&read_groups).unwrap_or_default()
+            };
+            if self.allows(&read, owner.as_deref()) {
+                out.insert(id);
+            }
+        }
+        Ok(Some(out))
+    }
+}
+
+/// capture id to its catalog `access_json` read list. an unreadable or absent catalog yields an
+/// empty map, and each capture then falls back to the catalog default of `["*"]`.
+fn capture_read_lists(cfg: &Config) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out = std::collections::HashMap::new();
+    let path = cfg.state_dir().join("state.sqlite");
+    let Ok(conn) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return out;
+    };
+    let Ok(mut stmt) = conn.prepare("select capture_id, access_json from captures") else {
+        return out;
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+    if let Ok(rows) = rows {
+        for (id, access) in rows.flatten() {
+            let read = serde_json::from_str::<Value>(&access)
+                .ok()
+                .and_then(|v| v.get("read").cloned().or(Some(v)))
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                .unwrap_or_else(|| vec!["*".to_string()]);
+            out.insert(id, read);
+        }
+    }
+    out
+}
+
+/// whether `reader` may fetch blob `sha`: it is the original or text of a readable capture, or a
+/// readable document references it as `blob:sha256:<sha>`.
+pub fn blob_readable(cfg: &Config, reader: &Reader, sha: &str) -> Result<bool> {
+    if reader.unrestricted {
+        return Ok(true);
+    }
+    let conn = index::open_newest(cfg)?;
+    let readable = reader.readable_ids(cfg, &conn)?.unwrap_or_default();
+    let mut holders: Vec<String> = Vec::new();
+    let mut stmt = conn.prepare("select from_id from refs where uri = ?1")?;
+    holders.extend(stmt.query_map([format!("blob:sha256:{sha}")], |r| r.get::<_, String>(0))?.flatten());
+    let path = cfg.state_dir().join("state.sqlite");
+    if let Ok(state) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        && let Ok(mut stmt) = state.prepare("select capture_id from captures where sha256_original = ?1 or sha256_text = ?1")
+        && let Ok(rows) = stmt.query_map([sha], |r| r.get::<_, String>(0))
+    {
+        holders.extend(rows.flatten());
+    }
+    Ok(holders.iter().any(|id| readable.contains(id)))
+}
+
 /// `query_vec` for `index::search`'s hybrid/vec modes comes from whichever provider is
 /// configured for the `embed` role, if any and if it supports `embed`; a missing or
 /// non-embedding provider degrades to fts silently (`index::search` already treats a `None`
 /// query embedding as "fall back to fts" for any mode that asked for vectors). the `rerank` role
 /// is passed through the same way; `Provider::supports_rerank` makes an unsupporting provider a
 /// no-op inside `index::search` itself.
-pub fn search(cfg: &Config, query: &str, opts: &SearchOpts) -> Result<Value> {
+pub fn search(cfg: &Config, reader: &Reader, query: &str, opts: &SearchOpts) -> Result<Value> {
     let conn = index::open_newest(cfg)?;
     let embed_provider = provider::provider_for_role(cfg, "embed").unwrap_or(None);
     let query_vec = match &embed_provider {
@@ -32,7 +121,14 @@ pub fn search(cfg: &Config, query: &str, opts: &SearchOpts) -> Result<Value> {
         _ => None,
     };
     let rerank_provider = provider::provider_for_role(cfg, "rerank").unwrap_or(None);
-    let hits = index::search(&conn, query, opts, query_vec.as_deref(), rerank_provider.as_deref())?;
+    let readable = reader.readable_ids(cfg, &conn)?;
+    // over-fetch when some hits may be withheld, so a restricted reader still gets `limit` results
+    let fetch = SearchOpts { limit: if readable.is_some() { opts.limit * 4 } else { opts.limit }, ..opts.clone() };
+    let mut hits = index::search(&conn, query, &fetch, query_vec.as_deref(), rerank_provider.as_deref())?;
+    if let Some(readable) = &readable {
+        hits.retain(|h| readable.contains(&h.doc_id));
+        hits.truncate(opts.limit);
+    }
     Ok(serde_json::to_value(hits)?)
 }
 
@@ -50,21 +146,35 @@ pub fn parse_search_mode(mode: Option<&str>) -> Option<SearchMode> {
 
 /// `None` when no document matches `id` (the caller turns that into a 404 or a "not found" tool
 /// result); an ambiguous prefix still surfaces as an `Err`.
-pub fn get(cfg: &Config, id: &str) -> Result<Option<Value>> {
+pub fn get(cfg: &Config, reader: &Reader, id: &str) -> Result<Option<Value>> {
     let conn = index::open_newest(cfg)?;
     let rec = index::get(&conn, id)?;
+    let readable = reader.readable_ids(cfg, &conn)?;
+    // an unreadable document answers exactly like a missing one
+    let rec = rec.filter(|r| readable.as_ref().is_none_or(|ids| ids.contains(&r.id)));
     rec.map(|r| Ok(serde_json::to_value(r)?)).transpose()
 }
 
-pub fn refs(cfg: &Config, id: &str, incoming: bool, depth: u32) -> Result<Value> {
+pub fn refs(cfg: &Config, reader: &Reader, id: &str, incoming: bool, depth: u32) -> Result<Value> {
     let conn = index::open_newest(cfg)?;
-    let rows = index::refs(&conn, id, incoming, depth)?;
-    Ok(serde_json::to_value(rows)?)
+    let readable = reader.readable_ids(cfg, &conn)?;
+    let mut rows = serde_json::to_value(index::refs(&conn, id, incoming, depth)?)?;
+    if let (Some(ids), Some(list)) = (&readable, rows.as_array_mut()) {
+        // keep an edge only when every document id it names is readable
+        list.retain(|row| {
+            ["from_id", "resolved_id", "to_id"].iter().filter_map(|k| row.get(*k).and_then(Value::as_str)).all(|v| ids.contains(v))
+        });
+    }
+    Ok(rows)
 }
 
-pub fn docs_list(cfg: &Config, filter: &LsFilter) -> Result<Value> {
+pub fn docs_list(cfg: &Config, reader: &Reader, filter: &LsFilter) -> Result<Value> {
     let conn = index::open_newest(cfg)?;
-    let rows = index::ls(&conn, filter)?;
+    let readable = reader.readable_ids(cfg, &conn)?;
+    let mut rows = index::ls(&conn, filter)?;
+    if let Some(ids) = &readable {
+        rows.retain(|r| ids.contains(&r.id));
+    }
     Ok(serde_json::to_value(rows)?)
 }
 
@@ -88,8 +198,10 @@ pub fn propose(cfg: &Config, principal: &str, task: &str, text: Option<String>, 
 /// `POST /answer` and the `answer` mcp tool: design.md §19 (the `answer` hook) and §27 ("ask a
 /// question"). `src/answer/` landed (from a concurrent agent) while this module was being
 /// written, so this calls it directly rather than the stub the task's fallback path described.
-pub fn answer(cfg: &Config, question: &str, limit: usize) -> Result<Value> {
-    let opts = crate::answer::AnswerOpts { limit, ..Default::default() };
+pub fn answer(cfg: &Config, reader: &Reader, question: &str, limit: usize) -> Result<Value> {
+    let conn = index::open_newest(cfg)?;
+    let readable = reader.readable_ids(cfg, &conn)?;
+    let opts = crate::answer::AnswerOpts { limit, readable, ..Default::default() };
     let result = crate::answer::answer(cfg, question, &opts)?;
     Ok(serde_json::to_value(result)?)
 }

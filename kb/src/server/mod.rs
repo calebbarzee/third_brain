@@ -178,9 +178,14 @@ fn worker_loop(server: &Server, cfg: &Config, auth_mode: &auth::AuthMode, shutdo
                 let start = Instant::now();
                 let method = request.method().as_str().to_string();
                 let path = request.url().split('?').next().unwrap_or("").to_string();
-                let (status, principal) = rest::handle(cfg, auth_mode, request);
+                // a panic in one handler must not take this worker thread with it; the dropped
+                // request is answered 500 by tiny_http.
+                let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rest::handle(cfg, auth_mode, request)));
                 let ms = start.elapsed().as_millis();
-                eprintln!("{method} {path} {principal} {status} {ms}ms");
+                match handled {
+                    Ok((status, principal)) => eprintln!("{method} {path} {principal} {status} {ms}ms"),
+                    Err(_) => eprintln!("{method} {path} - 500 {ms}ms (handler panicked)"),
+                }
             }
             Ok(None) => {} // recv_timeout elapsed with nothing waiting; loop and re-check shutdown
             Err(e) => {

@@ -145,6 +145,7 @@ fn handle_tools_call(cfg: &Config, principal: &str, reader_groups: &[String], pa
 }
 
 fn call_tool(cfg: &Config, principal: &str, reader_groups: &[String], name: &str, args: &Value) -> Result<Value> {
+    let reader = handlers::Reader::new(cfg, principal);
     match name {
         "search" => {
             let query = args.get("query").and_then(Value::as_str).context("search requires `query`")?;
@@ -155,17 +156,17 @@ fn call_tool(cfg: &Config, principal: &str, reader_groups: &[String], name: &str
                 mode: handlers::parse_search_mode(args.get("mode").and_then(Value::as_str)),
                 explain: args.get("explain").and_then(Value::as_bool).unwrap_or(false),
             };
-            handlers::search(cfg, query, &opts)
+            handlers::search(cfg, &reader, query, &opts)
         }
         "get" => {
             let id = args.get("id").and_then(Value::as_str).context("get requires `id`")?;
-            Ok(handlers::get(cfg, id)?.unwrap_or_else(|| json!({"error": format!("no document matches `{id}`")})))
+            Ok(handlers::get(cfg, &reader, id)?.unwrap_or_else(|| json!({"error": format!("no document matches `{id}`")})))
         }
         "refs" => {
             let id = args.get("id").and_then(Value::as_str).context("refs requires `id`")?;
             let incoming = args.get("incoming").and_then(Value::as_bool).unwrap_or(false);
             let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(1) as u32;
-            handlers::refs(cfg, id, incoming, depth)
+            handlers::refs(cfg, &reader, id, incoming, depth)
         }
         "propose" => {
             let task = args.get("task").and_then(Value::as_str).context("propose requires `task`")?;
@@ -182,7 +183,7 @@ fn call_tool(cfg: &Config, principal: &str, reader_groups: &[String], name: &str
         "answer" => {
             let question = args.get("question").and_then(Value::as_str).context("answer requires `question`")?;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(5) as usize;
-            handlers::answer(cfg, question, limit)
+            handlers::answer(cfg, &reader, question, limit)
         }
         other => bail!("unknown tool `{other}`"),
     }
