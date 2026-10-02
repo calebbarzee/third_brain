@@ -48,12 +48,13 @@ drop markdown files into `docs/` and commit. the hook renames each to its ulid, 
 | `kb answer ask "<question>"` | hybrid retrieval plus a cited answer from the `answer` provider; deferred passages when none is configured |
 | `kb answer eval [--compare fts,hybrid]`, `kb answer eval-seed` | retrieval quality against `eval/queries.toml` |
 | `kb import <dir> [--move] [--layer L]` | bring existing notes in through one session: frontmatter, ulids, link rewriting, source refs |
-| `kb serve [--no-auth]`, `kb mcp`, `kb token issue <principal>` | rest and mcp over http on 127.0.0.1:7777; mcp over stdio; bearer tokens |
+| `kb serve [--no-auth] [--read-only]`, `kb mcp`, `kb token issue <principal>` | rest and mcp over http on 127.0.0.1:7777; mcp over stdio; bearer tokens. `--read-only` refuses `propose` and the webhooks |
 | `kb schedule install [--serve]`, `status`, `uninstall` | systemd user timers for tick, capture, eod, nightly, backup |
 | `kb maintain nightly [--dry-run]`, `findings`, `escalations`, `compact` | nightly curation, escalations, compaction after a checkpoint |
 | `kb backup run [--kind mirror|bundle|store-copy|all]`, `manifest`, `verify`, `restore-drill <dir>` | backups per `backup.toml` |
 | `kb status` | one screen of repository, sessions, index, captures, backups, scheduler |
 | `kb run list`, `show`, `verify`, `diff`, `search` | run logs |
+| `kb transcript list [--since 24h] [--role R] [--kind llm\|mcp]`, `kb transcript show <id>` | the full request and reply of every model call and mcp tool call, from `.kb/state.sqlite` |
 | `kb validate`, `kb secrets`, `kb search`, `kb get`, `kb show` | aliases for the `check` and `index` forms above |
 | `kb provider test <role>`, `kb provider classify <file> [--write]` | provider connectivity and manual classify |
 | `kb gate ask --labels <a,b,...> [--context "..."] <text>` | run the quick gate (role `gate`) by hand |
@@ -87,6 +88,8 @@ kind = "command"
 base_url = "python3 /path/to/classifier.py"
 ```
 
+every completion through any role is stored in full in the `transcripts` table of `.kb/state.sqlite`, with its actor, run, session, and trigger (`KB_TRIGGER`: the systemd units set `timer:<job>`, the pre-commit hook `hook:pre-commit`, `kb mcp` uses `mcp:stdio`, `kb serve` uses `http`, otherwise `cli`). the `claude-code` adapter passes `--no-session-persistence`, so no copy lands in `~/.claude/projects`.
+
 `KB_PROVIDER_TIMEOUT_SECS` (default 600) bounds a request, including the `claude-code` and `command` adapters' child process (killed past the deadline). `KB_ANTHROPIC_THINKING_BUDGET` enables extended thinking on the anthropic adapter. `KB_CLAUDE_CODE_BIN` overrides the `claude` binary the `claude-code` adapter runs (default: `claude`, resolved on `PATH`).
 
 ### the quick gate
@@ -109,6 +112,20 @@ register the stdio server in an mcp client (claude code, cursor, or any mcp clie
 ```
 
 tools: `search`, `get`, `refs`, `propose`, `run`, `answer`. `propose` opens a session and applies validated operations; the agent then runs `kb merge <session>` or leaves it for `kb eod`.
+
+## approval rule
+
+`manifest.toml [thresholds] agent_auto_merge = false` (the default) makes every agent session review class: it waits in `kb review list` until a person runs `kb review approve`. any change outside `docs/*.md` (config, prompts, schemas, groups) is review class for humans too. turn `agent_auto_merge` on only after the review evaluation gate in design.md §31 passes.
+
+## simulate days
+
+`KB_NOW` (rfc 3339) fixes kb's clock: timestamps, ages, new ulids, and the dates on commits kb makes. `scripts/simulate.py` uses it to run a knowledge base through many simulated days with live models:
+
+```bash
+python3 scripts/simulate.py --out ../.tmp/sim_$(date +%F) --generations 12
+```
+
+it writes `simulation.log` (every command, landed diff, review verdict, and answer), `metrics.tsv`, `report.md`, and `gen_NN/` snapshots.
 
 ## develop
 
