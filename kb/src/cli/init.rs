@@ -165,7 +165,11 @@ pub fn init(root: &Path, force: bool, install_hook: bool) -> Result<Vec<String>>
             created.push(".gitignore (appended .kb/)".into());
         }
     }
-    if !crate::git::is_repo(root) {
+    // a directory inside another repository (a dotfiles home, a project's scratch folder) gets
+    // its own repository; otherwise every session branch would land in the enclosing one.
+    let is_own_toplevel = crate::git::is_repo(root)
+        && crate::git::toplevel(root).ok().and_then(|t| std::fs::canonicalize(t).ok()) == std::fs::canonicalize(root).ok();
+    if !is_own_toplevel {
         crate::git::run(root, &["init", "-q", "-b", "main"]).context("git init")?;
         created.push(".git".into());
     }
@@ -220,5 +224,16 @@ mod tests {
         assert_eq!(cfg.budget_for(crate::model::Layer::Design), 4000);
         let again = init(dir.path(), false, false).unwrap();
         assert!(again.is_empty());
+    }
+
+    #[test]
+    fn init_inside_another_repository_creates_its_own() {
+        let outer = tempfile::tempdir().unwrap();
+        crate::git::run(outer.path(), &["init", "-q", "-b", "main"]).unwrap();
+        let inner = outer.path().join("scratch").join("kb");
+        init(&inner, false, true).unwrap();
+        assert!(inner.join(".git").exists(), "kb init attached to the enclosing repository");
+        let top = std::fs::canonicalize(crate::git::toplevel(&inner).unwrap()).unwrap();
+        assert_eq!(top, std::fs::canonicalize(&inner).unwrap());
     }
 }

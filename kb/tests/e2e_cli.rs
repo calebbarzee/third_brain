@@ -1127,3 +1127,26 @@ mod provider {
         assert_eq!(text.matches("---").count(), 0, "the legacy yaml header should have been migrated, not left as stray body text");
     }
 }
+
+/// audit P0-3: the pre-commit fix re-stages what it rewrote and nothing else. an untracked,
+/// half-written note next to the staged one must stay out of the commit.
+#[test]
+fn staged_fix_leaves_unstaged_and_untracked_files_alone() {
+    let dir = init_repo();
+    let repo = dir.path();
+    commit_all(repo, "init");
+    write(repo, "docs/a.md", "# static ip\n\nset it with nmcli.\n");
+    kb::git::run(repo, &["add", "docs/a.md"]).unwrap();
+    write(repo, "docs/scratch.md", "half written, not ready\n");
+
+    kb_at(repo).args(["check", "validate", "--fix", "--staged", "--no-classify"]).assert().success();
+
+    let staged = kb::git::run(repo, &["diff", "--cached", "--name-status"]).unwrap();
+    assert!(!staged.contains("scratch.md"), "untracked file was staged:\n{staged}");
+    assert!(!staged.contains("docs/a.md"), "the renamed original should not be staged as a file:\n{staged}");
+    let added: Vec<&str> = staged.lines().filter(|l| l.starts_with('A')).collect();
+    assert_eq!(added.len(), 1, "exactly the renamed note is staged:\n{staged}");
+    assert!(repo.join("docs/scratch.md").is_file());
+    let untracked = kb::git::run(repo, &["status", "--porcelain", "--", "docs/scratch.md"]).unwrap();
+    assert!(untracked.starts_with("??"), "{untracked}");
+}

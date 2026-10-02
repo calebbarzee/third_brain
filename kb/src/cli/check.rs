@@ -65,16 +65,24 @@ fn run_validate(cfg: &Config, mut paths: Vec<PathBuf>, fix: bool, staged: bool, 
         if paths.is_empty() {
             return Ok(0);
         }
-        let mut changed = false;
+        // re-stage only what validation rewrote: each fixed file, and the old name of a file it
+        // renamed. staging all of docs/ would also commit files the author never staged.
+        let mut restage: Vec<String> = Vec::new();
         for path in &paths {
             let mut o = check::validate_file(cfg, path, fix)?;
             maybe_classify(cfg, fix, no_classify, &mut o)?;
             findings.extend(o.findings.iter().cloned());
-            changed |= o.changed;
+            if fix && o.changed {
+                restage.push(o.path.display().to_string());
+                if &o.path != path {
+                    restage.push(path.display().to_string());
+                }
+            }
         }
-        if fix && changed {
-            // re-stage everything under docs/ that validate touched, including renames
-            crate::git::run(&cfg.root, &["add", "-A", "--", "docs/"])?;
+        if !restage.is_empty() {
+            let mut args = vec!["add", "-A", "--"];
+            args.extend(restage.iter().map(String::as_str));
+            crate::git::run(&cfg.root, &args)?;
         }
         print_findings(&findings);
         return Ok(exit_code(&findings));
