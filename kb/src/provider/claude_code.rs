@@ -68,6 +68,9 @@ pub fn build_args(model: Option<&str>, system: Option<&str>) -> Vec<String> {
         // color a provider call
         "--setting-sources".to_string(),
         String::new(),
+        // the cli otherwise saves every call as a resumable session under ~/.claude/projects,
+        // which copies note bodies into the owner's claude history; kb keeps its own transcript
+        "--no-session-persistence".to_string(),
     ];
     if let Some(m) = model {
         args.push("--model".to_string());
@@ -96,6 +99,14 @@ pub fn map_response(raw: &Value) -> CompletionResponse {
     CompletionResponse { blocks: vec![Block::Text { text }], usage, stop_reason: "end_turn".to_string(), raw: raw.clone() }
 }
 
+/// an empty directory to run the cli in, so it never discovers a claude.md or project settings
+/// from the repository the caller happens to be in.
+fn neutral_cwd() -> Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join("kb-claude-code-cwd");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 fn stderr_tail(stderr: &str) -> String {
     let trimmed = stderr.trim();
     if trimmed.is_empty() { String::new() } else { format!(" (stderr: {})", truncate(trimmed, 500)) }
@@ -109,7 +120,7 @@ impl Provider for ClaudeCodeProvider {
     fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse> {
         let prompt = build_prompt(req);
         let args = build_args(self.model.as_deref(), req.system.as_deref());
-        let out = run_with_timeout(&self.bin, &args, &prompt, timeout_from_env())?;
+        let out = run_with_timeout(&self.bin, &args, &prompt, timeout_from_env(), Some(&neutral_cwd()?))?;
 
         let parsed: Option<Value> = serde_json::from_str(out.stdout.trim()).ok();
         match parsed {
@@ -162,7 +173,7 @@ mod tests {
     #[test]
     fn build_args_omits_model_and_system_when_absent() {
         let args = build_args(None, None);
-        assert_eq!(args, vec!["-p", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--setting-sources", ""]);
+        assert_eq!(args, vec!["-p", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence"]);
     }
 
     #[test]

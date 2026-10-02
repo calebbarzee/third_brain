@@ -59,7 +59,7 @@ impl Provider for CommandProvider {
     fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse> {
         let prompt = build_prompt(req);
         let (program, args) = self.parts.split_first().expect("checked non-empty in `new`");
-        let out = run_with_timeout(program, args, &prompt, timeout_from_env())?;
+        let out = run_with_timeout(program, args, &prompt, timeout_from_env(), None)?;
 
         if !out.status.success() {
             bail!(

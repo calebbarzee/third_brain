@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -22,9 +23,14 @@ pub(crate) fn timeout_from_env() -> Duration {
 /// run `program args...`, writing `stdin_data` to its stdin and closing it, then wait up to
 /// `timeout`, killing the child and erroring if it is still running past that. stdout and
 /// stderr are drained on background threads as they arrive, so a chatty child cannot deadlock
-/// this by filling a pipe buffer while nobody is polling `try_wait`.
-pub(crate) fn run_with_timeout(program: &str, args: &[String], stdin_data: &str, timeout: Duration) -> Result<ChildOutput> {
-    let mut child = Command::new(program)
+/// this by filling a pipe buffer while nobody is polling `try_wait`. `cwd`, when given, is the
+/// child's working directory; otherwise it inherits this process's.
+pub(crate) fn run_with_timeout(program: &str, args: &[String], stdin_data: &str, timeout: Duration, cwd: Option<&Path>) -> Result<ChildOutput> {
+    let mut command = Command::new(program);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
