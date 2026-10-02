@@ -19,6 +19,31 @@ use std::sync::OnceLock;
 const DEFAULT_STYLE: &str = include_str!("../../prompts/style.md");
 const DEFAULT_ANSWER: &str = include_str!("../../prompts/answer.md");
 
+/// longest passage handed to the answer model, in characters.
+const PASSAGE_CHARS: usize = 2_500;
+
+/// a section's text followed by its descendant sections' text, in document order (design.md §7:
+/// addressing a section addresses its children). a heading whose own chunk holds only a line or
+/// two, with the facts in its subsections, would otherwise reach the model empty.
+fn section_with_descendants(conn: &rusqlite::Connection, doc_id: &str, heading_path: &str) -> Option<String> {
+    let mut stmt = conn
+        .prepare("select text from chunks where doc_id = ?1 and (heading_path = ?2 or heading_path like ?3 escape '\\') order by ordinal")
+        .ok()?;
+    let child_prefix = format!("{}/%", heading_path.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+    let parts: Vec<String> = stmt.query_map(rusqlite::params![doc_id, heading_path, child_prefix], |r| r.get::<_, String>(0)).ok()?.flatten().collect();
+    let mut out = String::new();
+    for part in parts {
+        if out.chars().count() > PASSAGE_CHARS {
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(part.trim_end());
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 #[derive(Debug, Clone)]
 pub struct AnswerOpts {
     pub limit: usize,
@@ -188,12 +213,8 @@ pub fn answer_with_provider(cfg: &Config, question: &str, opts: &AnswerOpts, pro
     // the model answers from full passages, not the short display snippet (capped to keep the
     // prompt bounded; a chunk is one heading-bounded section)
     for hit in &mut hits {
-        if let Ok(text) = conn.query_row(
-            "select text from chunks where doc_id = ?1 and heading_path = ?2 limit 1",
-            rusqlite::params![hit.doc_id, hit.heading_path],
-            |r| r.get::<_, String>(0),
-        ) {
-            hit.snippet = if text.chars().count() > 2_500 { text.chars().take(2_500).collect::<String>() + "…" } else { text };
+        if let Some(text) = section_with_descendants(&conn, &hit.doc_id, &hit.heading_path) {
+            hit.snippet = if text.chars().count() > PASSAGE_CHARS { text.chars().take(PASSAGE_CHARS).collect::<String>() + "…" } else { text };
         }
     }
     log.context(serde_json::json!({"question": question, "hit_count": hits.len(), "doc_ids": hits.iter().map(|h| &h.doc_id).collect::<Vec<_>>()}))?;

@@ -238,3 +238,43 @@ fn build_step_5_vectors_prefixes_hybrid_answer_and_eval() {
     assert_eq!(metrics.n, 3);
     assert!(metrics.mrr_at_10 > 0.0, "each query is a literal match for its own document; mrr should be positive");
 }
+
+/// records the prompt it was sent, and answers with a fixed text.
+struct CapturingProvider {
+    prompt: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+impl Provider for CapturingProvider {
+    fn name(&self) -> &str {
+        "capturing"
+    }
+    fn complete(&self, req: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
+        *self.prompt.lock().unwrap() = req.messages.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+        Ok(CompletionResponse { blocks: vec![Block::Text { text: "ok".into() }], usage: Usage::default(), stop_reason: "end_turn".into(), raw: serde_json::json!({}) })
+    }
+}
+
+/// the simulation's miss: the best chunk was the `# Port 4` heading, whose own text is one line,
+/// while the measurements sit in its subsection. the passage must carry the subsection too.
+#[test]
+fn a_passage_includes_the_sections_under_its_heading() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    git::init_for_tests(root).unwrap();
+    write_doc(
+        root,
+        ID_NETWORK,
+        "port 4",
+        "# Port 4\n\nhow much attenuation does port 4 have?\n\n## Attenuation by frequency\n\n| Frequency | Attenuation |\n|---|---|\n| 5.8 GHz | 16 dB |\n\n## Isolation\n\n- 3 in to common out: -49 dB\n",
+    );
+    git::commit_all(root, "seed").unwrap();
+    let cfg = Config::load(root).unwrap();
+    index::build(&cfg, None).unwrap();
+    let prompt = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+
+    answer::answer_with_provider(&cfg, "port 4 attenuation", &AnswerOpts::default(), Some(Box::new(CapturingProvider { prompt: prompt.clone() }))).unwrap();
+
+    let sent = prompt.lock().unwrap().clone();
+    assert!(sent.contains("5.8 GHz | 16 dB"), "the subsection table never reached the model:\n{sent}");
+}
