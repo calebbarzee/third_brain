@@ -346,11 +346,23 @@ class Sim:
 	# -- metrics ------------------------------------------------------------------------------
 
 
+def normalize(text: str) -> str:
+	"""lowercase, no whitespace, no backticks: `15DB` and `15 dB`, or an inline command and the
+	same command in a code block, compare equal."""
+	return re.sub(r"[\s`]+", "", text).lower()
+
+
 def facts_in(text: str) -> set[str]:
 	out: set[str] = set()
 	for pattern in FACT_PATTERNS:
-		out.update(m.group(0).strip().lower() for m in re.finditer(pattern, text))
-	return out
+		out.update(normalize(m.group(0)) for m in re.finditer(pattern, text))
+	return {f for f in out if f}
+
+
+def facts_kept(facts: set[str], body: str) -> set[str]:
+	"""the facts whose normalized text still appears anywhere in the normalized body."""
+	flat = normalize(body)
+	return {f for f in facts if f in flat}
 
 
 def words(text: str) -> list[str]:
@@ -368,7 +380,7 @@ def measure(sim: Sim, gen: int, texts: dict[str, str], rows: list[dict]) -> None
 		base_body = sim.body(sim.baseline[doc_id])
 		prev_body = sim.body(sim.previous.get(doc_id, sim.baseline[doc_id]))
 		facts = facts_in(body)
-		kept = sim.baseline_facts[doc_id] & facts
+		kept = facts_kept(sim.baseline_facts[doc_id], body)
 		lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
 		repeated = len(lines) - len(set(lines))
 		lower = body.lower()
@@ -389,7 +401,7 @@ def measure(sim: Sim, gen: int, texts: dict[str, str], rows: list[dict]) -> None
 				"repeated_lines": repeated,
 				"generic_phrases": sum(lower.count(p) for p in GENERIC_PHRASES),
 				"status": (re.search(r'^status = "(\w+)"', text, re.MULTILINE) or [None, "?"])[1],
-				"lost_facts": "; ".join(sorted(sim.baseline_facts[doc_id] - facts))[:300],
+				"lost_facts": "; ".join(sorted(sim.baseline_facts[doc_id] - kept))[:300],
 			}
 		)
 	sim.previous = dict(texts)
@@ -589,7 +601,11 @@ def main() -> int:
 	parser.add_argument("--start", default="2026-10-05T09:00:00+00:00")
 	parser.add_argument("--writer-model", default="sonnet")
 	parser.add_argument("--fast-model", default="haiku")
+	parser.add_argument("--analyze", action="store_true", help="recompute metrics.tsv and report.md from an existing --out's snapshots and log, calling no model")
 	args = parser.parse_args()
+
+	if args.analyze:
+		return analyze(args.out.resolve(), args.kb_bin.resolve())
 
 	if args.out.exists():
 		print(f"refusing to reuse {args.out}; pick a new --out", file=sys.stderr)
@@ -626,6 +642,36 @@ def main() -> int:
 	(sim.out / "report.md").write_text(text)
 	sim.log("")
 	sim.log(text)
+	return 0
+
+
+def analyze(out: Path, kb_bin: Path) -> int:
+	"""rebuild the metrics and report of a finished run from gen_NN/ snapshots and simulation.log."""
+	sim = Sim(kb_bin=kb_bin, out=out, kb=out / "kb", log_path=out / "analyze.log", writer_model="", fast_model="", now=dt.datetime.now(dt.timezone.utc))
+	gens = sorted(int(p.name.removeprefix("gen_")) for p in out.glob("gen_[0-9][0-9]"))
+	first = {p.stem: p.read_text() for p in sorted((out / "gen_00").glob("*.md"))}
+	for doc_id, text in first.items():
+		match = re.search(r'^source_id\s*=\s*"([^"]+)"', text, re.MULTILINE) or re.search(r'^aliases\s*=\s*\["([^"]+)"', text, re.MULTILINE)
+		if match:
+			sim.ids.setdefault(match.group(1).removesuffix(".md"), doc_id)
+	sim.baseline = {k: v for k, v in first.items() if k in sim.ids.values()}
+	sim.baseline_facts = {k: facts_in(sim.body(v)) for k, v in sim.baseline.items()}
+	log = (out / "simulation.log").read_text()
+	sim.counters = {
+		"agent_sessions_landed": log.count("approved by the simulated person, landed"),
+		"review_request_changes": log.count("the content reviewer requested changes"),
+		"agent_sessions_empty": log.count(": no session (nothing applied)"),
+		"generation_errors": len(re.findall(r"generation \d+ raised", log)),
+		"queue_left": log.count("queue: leaving"),
+	}
+	rows: list[dict] = []
+	for gen in gens:
+		texts = {p.stem: p.read_text() for p in sorted((out / f"gen_{gen:02d}").glob("*.md"))}
+		measure(sim, gen, texts, rows)
+	write_metrics(out / "metrics.tsv", rows)
+	started = (out / "simulation.log").stat().st_ctime
+	(out / "report.md").write_text(report(sim, rows, gens[-1], started, count_claude_transcripts()))
+	print(f"wrote {out / 'metrics.tsv'} and {out / 'report.md'} for generations 0 to {gens[-1]}")
 	return 0
 
 
