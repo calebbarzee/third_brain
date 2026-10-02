@@ -62,7 +62,8 @@ justification, and explain why you did not act on it.
 ## addressing sections
 
 address a section only by one of the exact slug paths listed in that candidate's `headings`.
-an address outside that list is rejected.
+an address outside that list is rejected. `_preamble` is the text above a note's first heading,
+and `_body` is a whole note that has no headings; revise them like any other section.
 
 ## output
 

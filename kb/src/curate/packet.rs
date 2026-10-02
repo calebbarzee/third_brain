@@ -185,7 +185,15 @@ pub fn build(cfg: &Config, actor: &Actor, task: &str, texts: &[(String, String)]
             let allowed_ops = policy::allowed_ops(cfg, actor, &view);
             let layer = view.layer;
             let budget = cfg.budget_for(layer) as i64;
-            let headings: Vec<String> = parse_body(&rec.body).sections.into_iter().filter(|s| !s.heading.is_empty()).map(|s| s.path).collect();
+            // `_preamble` (text above the first heading) and `_body` (a note with no headings) are
+            // addressable too; without them an agent can only rewrite or duplicate that text
+            let body_parse = parse_body(&rec.body);
+            let headings: Vec<String> = body_parse
+                .sections
+                .into_iter()
+                .filter(|s| !s.heading.is_empty() || !rec.body[s.start..s.end].trim().is_empty())
+                .map(|s| s.path)
+                .collect();
 
             for r in &rec.refs_out {
                 if let Some(rid) = &r.resolved_id {
@@ -379,6 +387,28 @@ mod tests {
         assert!(terms.len() <= 12, "{terms:?}");
         let mut seen = std::collections::HashSet::new();
         assert!(terms.iter().all(|t| seen.insert(t.clone())), "duplicate term: {terms:?}");
+    }
+
+    /// a note with no headings is one `_body` section; the agent must see it as addressable.
+    #[test]
+    fn a_headingless_candidate_lists_its_body_as_addressable() {
+        let dir = seed_repo_with_index();
+        let root = dir.path();
+        let flat = "01K5A7Q2XW3ZRCM8T6YB4VJHFT";
+        write_doc(
+            root,
+            flat,
+            "layer = \"reference\"\ntitle = \"launcher ip\"\nstatus = \"canon\"\nagent_policy = \"editable\"\nowner = \"caleb\"",
+            "launcher static ip 192.168.50.10 on the wall port\n",
+        );
+        git::run(root, &["add", "-A"]).unwrap();
+        git::run(root, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "flat"]).unwrap();
+        let cfg = Config::load(root).unwrap();
+        index::build(&cfg, None).unwrap();
+        let texts = vec![("capture:01ABC".to_string(), "launcher static ip wall port".to_string())];
+        let packet = build(&cfg, &agent("svc-curate"), "curate one capture", &texts).unwrap();
+        let candidate = packet.candidates.iter().find(|c| c.id == flat).expect("the flat note is a candidate");
+        assert_eq!(candidate.headings, vec!["_body".to_string()]);
     }
 
     #[test]
