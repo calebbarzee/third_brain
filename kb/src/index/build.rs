@@ -65,7 +65,7 @@ pub struct RefRow {
 }
 
 fn index_dir(cfg: &Config) -> PathBuf {
-    cfg.root.join(".kb").join("index")
+    cfg.state_dir().join("index")
 }
 
 /// build (or reuse) the artifact for `target` (defaults to `HEAD`), using whatever `contextualize`

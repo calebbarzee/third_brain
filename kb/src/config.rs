@@ -292,9 +292,28 @@ impl Config {
         out
     }
 
+    /// `<root>/.kb`, except in a linked worktree (a session's, where the pre-commit hook runs),
+    /// where it is the main repository's `.kb`: state written there must outlive the worktree.
     pub fn state_dir(&self) -> PathBuf {
-        self.root.join(".kb")
+        main_root_of(&self.root).unwrap_or_else(|| self.root.clone()).join(".kb")
     }
+}
+
+/// for a linked worktree, whose `.git` is a file reading `gitdir: <main>/.git/worktrees/<name>`,
+/// the main repository's root; `None` for a main checkout or anything else.
+fn main_root_of(root: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(root.join(".git")).ok()?;
+    let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+    let gitdir = if gitdir.is_absolute() { gitdir } else { root.join(gitdir) };
+    let worktrees = gitdir.parent()?;
+    if worktrees.file_name()? != "worktrees" {
+        return None;
+    }
+    let main_git = worktrees.parent()?;
+    if main_git.file_name()? != ".git" {
+        return None;
+    }
+    main_git.parent().map(Path::to_path_buf)
 }
 
 fn read_or_default<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Result<T> {
@@ -331,6 +350,20 @@ fn merge_tables(base: &mut toml::Value, over: toml::Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn state_dir_in_a_linked_worktree_is_the_main_repositorys() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        crate::git::init_for_tests(&main).unwrap();
+        crate::git::commit_all(&main, "root").unwrap();
+        let wt = main.join(".kb").join("worktrees").join("s1");
+        crate::git::run(&main, &["worktree", "add", "--detach", &wt.display().to_string()]).unwrap();
+        let in_worktree = Config::load(&wt).unwrap();
+        assert_eq!(std::fs::canonicalize(in_worktree.state_dir().parent().unwrap()).unwrap(), std::fs::canonicalize(&main).unwrap());
+        assert_eq!(Config::load(&main).unwrap().state_dir(), main.join(".kb"));
+    }
+
     use super::*;
 
     #[test]
