@@ -32,6 +32,7 @@ pub mod check;
 pub mod index;
 pub mod provider;
 pub mod config;
+pub mod clock;
 pub mod git;
 pub mod session;
 pub mod runlog;

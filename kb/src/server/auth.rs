@@ -59,7 +59,7 @@ pub fn issue(cfg: &Config, principal: &str) -> Result<String> {
     let token = random_token()?;
     let hash = sha256_hex(token.as_bytes());
     let conn = open(cfg)?;
-    let created_at = chrono::Utc::now().to_rfc3339();
+    let created_at = crate::clock::now().to_rfc3339();
     conn.execute(
         "insert into tokens (token_sha256, principal, created_at, last_used, revoked) values (?1, ?2, ?3, null, 0)",
         params![hash, principal, created_at],
@@ -105,7 +105,7 @@ pub fn verify(cfg: &Config, token: &str) -> Result<Option<String>> {
     let principal: Option<String> =
         conn.query_row("select principal from tokens where token_sha256 = ?1 and revoked = 0", params![hash], |r| r.get(0)).optional()?;
     if let Some(p) = &principal {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = crate::clock::now().to_rfc3339();
         conn.execute("update tokens set last_used = ?1 where token_sha256 = ?2", params![now, hash])?;
         return Ok(Some(p.clone()));
     }

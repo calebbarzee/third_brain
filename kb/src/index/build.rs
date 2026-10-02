@@ -759,7 +759,7 @@ fn build_into(
     // ever written, which is when criticality::criticality_pct redistributes reads_90d/cites_90d's
     // weight to the other three metrics; once any usage row exists, every canon document gets a
     // real (possibly zero) count instead.
-    let (usage_present, usage_by_doc) = usage::aggregate_90d(cfg, chrono::Utc::now())?;
+    let (usage_present, usage_by_doc) = usage::aggregate_90d(cfg, crate::clock::now())?;
 
     let refs = build_refs(&docs, &by_id, &tombstone_ids, &capture_drift);
 
@@ -1034,7 +1034,7 @@ fn build_into(
             meta_stmt.execute(params!["chunker_version", cfg.manifest.chunker_version.to_string()])?;
             meta_stmt.execute(params!["weights", weights_json])?;
             meta_stmt.execute(params!["canon_count", canon_ids.len().to_string()])?;
-            meta_stmt.execute(params!["built_at", chrono::Utc::now().to_rfc3339()])?;
+            meta_stmt.execute(params!["built_at", crate::clock::now().to_rfc3339()])?;
             meta_stmt.execute(params!["maintenance_enabled", if maintenance_enabled { "1" } else { "0" }])?;
         }
         tx.commit()?;
@@ -1123,7 +1123,7 @@ fn apply_retention(dir: &Path) -> Result<()> {
         artifacts.push((path, mtime));
     }
     artifacts.sort_by(|a, b| b.1.cmp(&a.1));
-    let keep: HashSet<PathBuf> = retain_artifacts(&artifacts, SystemTime::now()).into_iter().collect();
+    let keep: HashSet<PathBuf> = retain_artifacts(&artifacts, crate::clock::system_now()).into_iter().collect();
     for (path, _) in &artifacts {
         if !keep.contains(path) {
             std::fs::remove_file(path).ok();
@@ -1210,7 +1210,7 @@ mod tests {
 
     #[test]
     fn retention_keeps_last_20_plus_one_per_day_within_90() {
-        let now = SystemTime::now();
+        let now = crate::clock::system_now();
         let mut artifacts = Vec::new();
         // 25 artifacts, one per day, newest first.
         for i in 0..25u64 {

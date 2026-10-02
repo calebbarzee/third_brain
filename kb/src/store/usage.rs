@@ -24,7 +24,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
 
 /// today's date (utc) as `YYYY-MM-DD`, the `usage.day` key.
 fn today() -> String {
-    Utc::now().format("%Y-%m-%d").to_string()
+    crate::clock::now().format("%Y-%m-%d").to_string()
 }
 
 /// record one read for each of `doc_ids` (duplicates in the slice count once each, matching "one
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn absent_until_first_write() {
         let (_dir, cfg) = cfg();
-        let (present, agg) = aggregate_90d(&cfg, Utc::now()).unwrap();
+        let (present, agg) = aggregate_90d(&cfg, crate::clock::now()).unwrap();
         assert!(!present);
         assert!(agg.is_empty());
     }
@@ -114,7 +114,7 @@ mod tests {
         record_reads(&cfg, &["d1".to_string()]).unwrap();
         record_cites(&cfg, &["d1".to_string()]).unwrap();
 
-        let (present, agg) = aggregate_90d(&cfg, Utc::now()).unwrap();
+        let (present, agg) = aggregate_90d(&cfg, crate::clock::now()).unwrap();
         assert!(present);
         assert_eq!(agg.get("d1"), Some(&(2, 1)));
         assert_eq!(agg.get("d2"), Some(&(1, 0)));
@@ -128,7 +128,7 @@ mod tests {
         ensure_schema(&conn).unwrap();
         conn.execute("insert into usage (doc_id, day, reads, cites) values ('old', '2000-01-01', 5, 5)", []).unwrap();
         conn.execute("insert into usage (doc_id, day, reads, cites) values ('recent', ?1, 3, 1)", params![today()]).unwrap();
-        let (present, agg) = aggregate_90d(&cfg, Utc::now()).unwrap();
+        let (present, agg) = aggregate_90d(&cfg, crate::clock::now()).unwrap();
         assert!(present);
         assert_eq!(agg.get("old"), None);
         assert_eq!(agg.get("recent"), Some(&(3, 1)));

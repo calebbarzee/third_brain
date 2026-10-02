@@ -28,7 +28,7 @@ use crate::review::udiff::render_unified;
 use crate::runlog::{RunLog, RunStart, RunStatus};
 use crate::session;
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -72,7 +72,7 @@ fn write_escalation(cfg: &Config, f: &Finding) -> Result<String> {
     let dir = escalations_dir(cfg);
     std::fs::create_dir_all(&dir)?;
     let id = model::new_ulid();
-    let rec = EscalationRecord { kind: f.kind.to_string(), doc_ids: f.doc_ids.clone(), detail: f.detail.clone(), ts: Utc::now().to_rfc3339(), resolved: false };
+    let rec = EscalationRecord { kind: f.kind.to_string(), doc_ids: f.doc_ids.clone(), detail: f.detail.clone(), ts: crate::clock::now().to_rfc3339(), resolved: false };
     std::fs::write(dir.join(format!("{id}.toml")), toml::to_string_pretty(&rec).context("serializing escalation")?)?;
     Ok(id)
 }
@@ -156,7 +156,7 @@ pub fn resolve_since(cfg: &Config, since: Option<&str>) -> Result<String> {
             return Ok(sha);
         }
         if let Some(days) = parse_duration_days(s) {
-            let cutoff = (Utc::now() - Duration::seconds((days * 86_400.0) as i64)).to_rfc3339();
+            let cutoff = (crate::clock::now() - Duration::seconds((days * 86_400.0) as i64)).to_rfc3339();
             return match git::rev_list_before(&cfg.root, "main", &cutoff)? {
                 Some(sha) => Ok(sha),
                 None => first_commit(cfg),
@@ -171,7 +171,7 @@ pub fn resolve_since(cfg: &Config, since: Option<&str>) -> Result<String> {
             return Ok(sha.to_string());
         }
     }
-    let cutoff = (Utc::now() - Duration::hours(24)).to_rfc3339();
+    let cutoff = (crate::clock::now() - Duration::hours(24)).to_rfc3339();
     match git::rev_list_before(&cfg.root, "main", &cutoff)? {
         Some(sha) => Ok(sha),
         None => first_commit(cfg),
@@ -280,7 +280,7 @@ fn apply_add_banner_and_pointer(worktree: &Path, op: &ProposedOp) -> Result<Appl
             let title = parse_document(&text).ok()?.frontmatter.title?;
             Some((title, format!("kb:{id}")))
         });
-        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let today = crate::clock::now().format("%Y-%m-%d").to_string();
         let banner_text = crate::check::render_banner(status, &today, target.as_ref().map(|(t, u)| (t.as_str(), u.as_str())));
         body = format!("{banner_text}\n{}", body.trim_start_matches('\n'));
     }
@@ -543,7 +543,7 @@ fn maybe_checkpoint(cfg: &Config, clean: bool, summary: &str) -> Result<Option<S
     if !clean {
         return Ok(None);
     }
-    let date = Utc::now().format("%Y-%m-%d").to_string();
+    let date = crate::clock::now().format("%Y-%m-%d").to_string();
     let tag = format!("checkpoint/{date}");
     if git::tag_exists(&cfg.root, &tag) {
         return Ok(Some(tag));

@@ -124,7 +124,7 @@ fn open_sessions(cfg: &Config) -> Result<Vec<OpenSessionRow>> {
             continue;
         }
         let age_hours = match chrono::DateTime::parse_from_rfc3339(&s.opened_at) {
-            Ok(t) => (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() as f64 / 3600.0,
+            Ok(t) => (crate::clock::now() - t.with_timezone(&chrono::Utc)).num_seconds() as f64 / 3600.0,
             Err(_) => 0.0,
         };
         rows.push(OpenSessionRow { id: s.id, state: s.state.as_str().to_string(), actor: s.actor, age_hours });

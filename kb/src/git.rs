@@ -11,9 +11,20 @@ use std::process::Command;
 /// meant for this.
 const NO_COLOR: [&str; 4] = ["-c", "color.ui=never", "-c", "core.pager=cat"];
 
+/// a `git` command. when `KB_NOW` fixes the clock, commits kb makes carry that date, so a
+/// simulated day's history reads as that day.
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    if let Some(now) = crate::clock::fixed() {
+        let stamp = now.to_rfc3339();
+        command.env("GIT_AUTHOR_DATE", &stamp).env("GIT_COMMITTER_DATE", &stamp);
+    }
+    command
+}
+
 /// run git with args; error carries stderr on a non-zero exit. stdout returned as utf-8 (lossy).
 pub fn run(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    let out = git_command()
         .arg("-C")
         .arg(repo)
         .args(NO_COLOR)
@@ -28,7 +39,7 @@ pub fn run(repo: &Path, args: &[&str]) -> Result<String> {
 
 /// like `run` but returns raw bytes (for `git show` of arbitrary content).
 pub fn run_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let out = Command::new("git").arg("-C").arg(repo).args(NO_COLOR).args(args).output()?;
+    let out = git_command().arg("-C").arg(repo).args(NO_COLOR).args(args).output()?;
     if !out.status.success() {
         bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -116,7 +127,7 @@ pub fn status_porcelain(repo: &Path, path: &str) -> Result<Vec<String>> {
 }
 
 pub fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
-    Command::new("git")
+    git_command()
         .arg("-C")
         .arg(repo)
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
@@ -154,7 +165,7 @@ pub fn commit_all(repo: &Path, message: &str) -> Result<String> {
 /// `GIT_COMMITTER_DATE`); lets a test backdate a commit without touching the system clock.
 pub fn commit_all_dated(repo: &Path, message: &str, when_rfc3339: &str) -> Result<String> {
     run(repo, &["add", "-A"])?;
-    let out = Command::new("git")
+    let out = git_command()
         .arg("-C")
         .arg(repo)
         .args(NO_COLOR)
@@ -342,7 +353,7 @@ fn parse_git_version(s: &str) -> Option<(u32, u32)> {
 /// true when the local git binary is at least `major.minor`. used to gate `merge_tree_write_tree`
 /// on git >= 2.38, the version `merge-tree --write-tree` was introduced in.
 pub fn version_at_least(major: u32, minor: u32) -> bool {
-    Command::new("git")
+    git_command()
         .arg("--version")
         .output()
         .ok()
@@ -362,7 +373,7 @@ pub fn merge_tree_write_tree(repo: &Path, head: &str, main: &str) -> Result<Opti
     if !version_at_least(2, 38) {
         return Ok(None);
     }
-    let out = Command::new("git")
+    let out = git_command()
         .arg("-C")
         .arg(repo)
         .args(NO_COLOR)
@@ -378,7 +389,7 @@ pub fn merge_tree_write_tree(repo: &Path, head: &str, main: &str) -> Result<Opti
 /// file content at a tree object (as opposed to `show_file`'s commit-ish `rev`). `Ok(None)` when
 /// the path does not exist in that tree (e.g. deleted by the trial merge).
 pub fn show_tree_path(repo: &Path, tree: &str, path: &str) -> Result<Option<Vec<u8>>> {
-    let out = Command::new("git").arg("-C").arg(repo).args(NO_COLOR).args(["show", &format!("{tree}:{path}")]).output()?;
+    let out = git_command().arg("-C").arg(repo).args(NO_COLOR).args(["show", &format!("{tree}:{path}")]).output()?;
     Ok(out.status.success().then_some(out.stdout))
 }
 
@@ -408,7 +419,7 @@ pub struct RebaseResult {
 }
 
 pub fn rebase(repo: &Path, onto: &str) -> Result<RebaseResult> {
-    let out = Command::new("git").arg("-C").arg(repo).args(NO_COLOR).args(["rebase", onto]).output().with_context(|| format!("running git rebase {onto}"))?;
+    let out = git_command().arg("-C").arg(repo).args(NO_COLOR).args(["rebase", onto]).output().with_context(|| format!("running git rebase {onto}"))?;
     Ok(RebaseResult {
         clean: out.status.success(),
         message: format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
@@ -418,7 +429,7 @@ pub fn rebase(repo: &Path, onto: &str) -> Result<RebaseResult> {
 /// `git rebase --continue` with a no-op editor: the rebased commit's message is set afterward
 /// with `amend_message` rather than through the rebase's own editor prompt.
 pub fn rebase_continue(repo: &Path) -> Result<RebaseResult> {
-    let out = Command::new("git")
+    let out = git_command()
         .arg("-C")
         .arg(repo)
         .args(NO_COLOR)
@@ -530,7 +541,7 @@ pub fn branches_merged(repo: &Path, target: &str, pattern: &str) -> Result<Vec<S
 /// (`git grep -l -F`); used by the delete guard (design.md §17.4). an empty result (git's exit
 /// code 1 for "no matches") is not an error.
 pub fn grep_literal(repo: &Path, rev: &str, pattern: &str, pathspec: &str) -> Result<Vec<String>> {
-    let out = Command::new("git")
+    let out = git_command()
         .arg("-C")
         .arg(repo)
         .args(NO_COLOR)
@@ -612,7 +623,7 @@ pub fn tag_commit(repo: &Path, name: &str) -> Result<String> {
 /// `git init --bare` at an arbitrary path (not necessarily inside an existing repository, so this
 /// does not go through `run`'s `-C <repo>` wrapping).
 pub fn init_bare(path: &Path) -> Result<()> {
-    let out = Command::new("git").args(NO_COLOR).arg("init").arg("--bare").arg(path).output().context("running git init --bare")?;
+    let out = git_command().args(NO_COLOR).arg("init").arg("--bare").arg(path).output().context("running git init --bare")?;
     if !out.status.success() {
         bail!("git init --bare {} failed: {}", path.display(), String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -643,7 +654,7 @@ pub fn bundle_verify(repo: &Path, bundle: &Path) -> Result<String> {
 /// `git clone <source> <dest>`, for a restore drill: `dest` must not yet be a repository, so this
 /// does not go through `run`'s `-C <repo>` wrapping.
 pub fn clone(source: &Path, dest: &Path) -> Result<()> {
-    let out = Command::new("git").args(NO_COLOR).arg("clone").arg(source).arg(dest).output().context("running git clone")?;
+    let out = git_command().args(NO_COLOR).arg("clone").arg(source).arg(dest).output().context("running git clone")?;
     if !out.status.success() {
         bail!("git clone {} {} failed: {}", source.display(), dest.display(), String::from_utf8_lossy(&out.stderr).trim());
     }

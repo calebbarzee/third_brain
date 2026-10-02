@@ -210,7 +210,7 @@ impl RunLog {
         conn.execute_batch("pragma journal_mode = WAL; pragma synchronous = FULL;")?;
         schema::create_schema(&conn)?;
 
-        let started_at = chrono::Utc::now().to_rfc3339();
+        let started_at = crate::clock::now().to_rfc3339();
         let prompt_checksums_json = serde_json::to_string(&start.prompt_checksums)?;
         conn.execute(
             "insert into run (run_id, actor, principal, skill, skill_version, provider, model,
@@ -282,7 +282,7 @@ impl RunLog {
     /// `ts`, and the canonical (sorted-key) json of `payload`. one `BEGIN IMMEDIATE` transaction
     /// per event; returns the assigned `seq`.
     pub fn log(&mut self, kind: EventKind, payload: Value) -> Result<i64> {
-        let ts = chrono::Utc::now().to_rfc3339();
+        let ts = crate::clock::now().to_rfc3339();
         // serde_json's `Map` is a `BTreeMap` by default (the `preserve_order` feature is off in
         // this crate), so `to_string` already emits object keys in sorted order: this is the
         // "canonical payload json" the hash is computed over.
@@ -444,7 +444,7 @@ impl RunLog {
         settled_commits: &[String],
         access_read: &[String],
     ) -> Result<String> {
-        let finished_at = chrono::Utc::now().to_rfc3339();
+        let finished_at = crate::clock::now().to_rfc3339();
         let settled_json = serde_json::to_string(settled_commits)?;
         let access_json = serde_json::to_string(access_read)?;
         let payload = serde_json::json!({

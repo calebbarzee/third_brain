@@ -449,7 +449,7 @@ fn write_review_note(cfg: &Config, session: &Session, class: MergeClass, reasons
         reasons: reasons.to_vec(),
         checks: checks.to_vec(),
         run_id: run_id.to_string(),
-        ts: chrono::Utc::now().to_rfc3339(),
+        ts: crate::clock::now().to_rfc3339(),
     };
     let toml_text = toml::to_string_pretty(&note).context("serializing review note")?;
     let head = git::head(&session.worktree)?;
@@ -631,7 +631,7 @@ fn check_delete_guard(cfg: &Config, repo: &Path, base: &str, path: &str, deleted
         Some(Status::Superseded) | Some(Status::Archived) => true,
         Some(Status::Draft) => match git::last_commit_date(repo, path) {
             Some(date) => chrono::DateTime::parse_from_rfc3339(&date)
-                .map(|d| (chrono::Utc::now() - d.with_timezone(&chrono::Utc)).num_days() as u32 > cfg.manifest.thresholds.draft_ttl_days)
+                .map(|d| (crate::clock::now() - d.with_timezone(&chrono::Utc)).num_days() as u32 > cfg.manifest.thresholds.draft_ttl_days)
                 .unwrap_or(false),
             None => false,
         },
@@ -826,7 +826,7 @@ fn content_review(cfg: &Config, session: &Session, main_sha: &str, head: &str) -
 
 fn session_age_hours(session: &Session) -> f64 {
     chrono::DateTime::parse_from_rfc3339(&session.opened_at)
-        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() as f64 / 3600.0)
+        .map(|t| (crate::clock::now() - t.with_timezone(&chrono::Utc)).num_seconds() as f64 / 3600.0)
         .unwrap_or(0.0)
 }
 

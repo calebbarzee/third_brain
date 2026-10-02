@@ -185,7 +185,7 @@ fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
 }
 
 fn age_days(since: &DateTime<Utc>) -> i64 {
-    (Utc::now() - *since).num_days()
+    (crate::clock::now() - *since).num_days()
 }
 
 // -------------------------------------------------------------------------------------------
@@ -202,7 +202,7 @@ fn detect_stale(conn: &Connection, enabled: bool) -> Result<Vec<Finding>> {
     let rows = stmt.query_map([], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?))
     })?;
-    let now = Utc::now();
+    let now = crate::clock::now();
     for row in rows {
         let (id, title, fm_json, reads, cites) = row?;
         if reads != 0 || cites != 0 {
@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn stale_fires_on_past_review_by_with_no_usage() {
         let conn = conn_with_schema();
-        let old = (Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+        let old = (crate::clock::now() - chrono::Duration::days(400)).to_rfc3339();
         insert_doc(&conn, "01K5A7Q2XW3ZRCM8T6YB4VJH0A", "canon", "reference", r#"{"review_by":{"$__toml_private_datetime":"2020-01-01"}}"#, 10, &old);
         let out = detect_stale(&conn, true).unwrap();
         assert_eq!(out.len(), 1);
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn stale_auto_fix_is_none_below_min_corpus() {
         let conn = conn_with_schema();
-        let old = (Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+        let old = (crate::clock::now() - chrono::Duration::days(400)).to_rfc3339();
         insert_doc(&conn, "01K5A7Q2XW3ZRCM8T6YB4VJH0A", "canon", "reference", r#"{"review_by":{"$__toml_private_datetime":"2020-01-01"}}"#, 10, &old);
         let out = detect_stale(&conn, false).unwrap();
         assert_eq!(out.len(), 1);
@@ -772,7 +772,7 @@ mod tests {
     #[test]
     fn stale_skips_documents_with_usage() {
         let conn = conn_with_schema();
-        let old = (Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+        let old = (crate::clock::now() - chrono::Duration::days(400)).to_rfc3339();
         insert_doc(&conn, "01K5A7Q2XW3ZRCM8T6YB4VJH0A", "canon", "reference", r#"{"review_by":{"$__toml_private_datetime":"2020-01-01"}}"#, 10, &old);
         conn.execute("update graph_metrics set reads_90d = 3 where doc_id = '01K5A7Q2XW3ZRCM8T6YB4VJH0A'", []).unwrap();
         assert!(detect_stale(&conn, true).unwrap().is_empty());
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn orphan_fires_when_no_dependents_and_old() {
         let conn = conn_with_schema();
-        let old = (Utc::now() - chrono::Duration::days(200)).to_rfc3339();
+        let old = (crate::clock::now() - chrono::Duration::days(200)).to_rfc3339();
         insert_doc(&conn, "01K5A7Q2XW3ZRCM8T6YB4VJH0B", "canon", "reference", "{}", 10, &old);
         let cfg = Config { root: std::path::PathBuf::new(), kb: Default::default(), manifest: Default::default(), groups: Default::default() };
         let out = detect_orphan(&conn, &cfg, true).unwrap();
@@ -792,7 +792,7 @@ mod tests {
     #[test]
     fn over_budget_always_escalates() {
         let conn = conn_with_schema();
-        let now = Utc::now().to_rfc3339();
+        let now = crate::clock::now().to_rfc3339();
         insert_doc(&conn, "01K5A7Q2XW3ZRCM8T6YB4VJH0C", "canon", "reference", "{}", 100_000, &now);
         let cfg = Config { root: std::path::PathBuf::new(), kb: Default::default(), manifest: Default::default(), groups: Default::default() };
         let out = detect_over_budget(&conn, &cfg).unwrap();
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn superseded_past_delete_days_fires() {
         let conn = conn_with_schema();
-        let old = (Utc::now() - chrono::Duration::days(120)).to_rfc3339();
+        let old = (crate::clock::now() - chrono::Duration::days(120)).to_rfc3339();
         conn.execute(
             "insert into documents (id, kind, path, status, last_updated, created) values ('s1','document','docs/s1.md','superseded',?1,?1)",
             [&old],
@@ -876,8 +876,8 @@ mod tests {
     #[test]
     fn draft_past_ttl_requires_no_commits_since_creation() {
         let conn = conn_with_schema();
-        let old = (Utc::now() - chrono::Duration::days(60)).to_rfc3339();
-        let recent = Utc::now().to_rfc3339();
+        let old = (crate::clock::now() - chrono::Duration::days(60)).to_rfc3339();
+        let recent = crate::clock::now().to_rfc3339();
         // d1: only its creating commit, 60 days ago -- no commits since creation.
         conn.execute(
             "insert into documents (id, kind, path, status, created, last_updated) values ('d1','document','docs/d1.md','draft',?1,?1)",

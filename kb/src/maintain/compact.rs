@@ -140,7 +140,7 @@ fn move_closed_sessions(cfg: &Config) -> Result<usize> {
         }
         let reference_ts = sess.abandoned_at.as_deref().unwrap_or(&sess.touched_at);
         let Ok(ts) = chrono::DateTime::parse_from_rfc3339(reference_ts) else { continue };
-        let age_days = (chrono::Utc::now() - ts.with_timezone(&chrono::Utc)).num_days();
+        let age_days = (crate::clock::now() - ts.with_timezone(&chrono::Utc)).num_days();
         if age_days < 30 {
             continue;
         }
@@ -171,7 +171,7 @@ fn enforce_index_retention(cfg: &Config) -> Result<usize> {
     }
     artifacts.sort_by(|a, b| b.1.cmp(&a.1));
     const DAY_SECS: u64 = 86_400;
-    let now = SystemTime::now();
+    let now = crate::clock::system_now();
     let mut keep: HashSet<PathBuf> = HashSet::new();
     let mut days_seen: HashSet<i64> = HashSet::new();
     for (path, mtime) in artifacts.iter().take(20) {

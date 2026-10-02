@@ -133,7 +133,7 @@ fn ensure_heading(content: &str, title: Option<&str>) -> String {
 }
 
 fn today() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
+    crate::clock::now().format("%Y-%m-%d").to_string()
 }
 
 fn read_and_parse(path: &Path) -> Result<(String, crate::model::Document)> {

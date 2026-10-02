@@ -111,13 +111,13 @@ fn session_path(cfg: &Config, id: &str) -> PathBuf {
 }
 
 fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339()
+    crate::clock::now().to_rfc3339()
 }
 
 /// hours elapsed since an rfc3339 timestamp; 0.0 when it does not parse.
 fn hours_since(rfc3339: &str) -> f64 {
     match chrono::DateTime::parse_from_rfc3339(rfc3339) {
-        Ok(t) => (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() as f64 / 3600.0,
+        Ok(t) => (crate::clock::now() - t.with_timezone(&chrono::Utc)).num_seconds() as f64 / 3600.0,
         Err(_) => 0.0,
     }
 }

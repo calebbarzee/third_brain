@@ -350,7 +350,7 @@ pub fn validate_repo(cfg: &Config, fix: bool) -> Result<RepoValidateOutcome> {
 
     let mut findings = Vec::new();
     let mut by_id: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
-    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let now_ms = crate::clock::now().timestamp_millis().max(0) as u64;
     for (path, outcome) in &files {
         let Some(id) = &outcome.document.frontmatter.id else { continue };
         by_id.entry(id.clone()).or_default().push(path.clone());
@@ -426,7 +426,7 @@ fn safe_parse(text: &str, findings: &mut Vec<Finding>, path_str: &str) -> (Front
 }
 
 fn today() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
+    crate::clock::now().format("%Y-%m-%d").to_string()
 }
 
 /// the target document's title, when it exists under `root`'s `docs/` tree (flat or sharded into

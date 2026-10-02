@@ -420,7 +420,7 @@ pub fn is_ulid(s: &str) -> bool {
 }
 
 pub fn new_ulid() -> String {
-    ulid::Ulid::generate().to_string()
+    ulid::Ulid::from_datetime(crate::clock::system_now()).to_string()
 }
 
 #[cfg(test)]

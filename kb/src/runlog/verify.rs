@@ -201,7 +201,7 @@ pub struct RunListRow {
 /// exists in both directories (open, then sealed into the store) is listed once, preferring the
 /// `<state>/runs/` copy.
 pub fn list(cfg: &Config, since: Option<Duration>, status: Option<&str>) -> Result<Vec<RunListRow>> {
-    let cutoff = since.and_then(|d| chrono::Duration::from_std(d).ok()).map(|d| Utc::now() - d);
+    let cutoff = since.and_then(|d| chrono::Duration::from_std(d).ok()).map(|d| crate::clock::now() - d);
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for dir in [super::runs_dir(cfg), super::store_runs_dir(cfg)] {

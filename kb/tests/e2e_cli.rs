@@ -1150,3 +1150,29 @@ fn staged_fix_leaves_unstaged_and_untracked_files_alone() {
     let untracked = kb::git::run(repo, &["status", "--porcelain", "--", "docs/scratch.md"]).unwrap();
     assert!(untracked.starts_with("??"), "{untracked}");
 }
+
+/// `KB_NOW` fixes the clock for everything kb records: a new document's ulid and the date on
+/// the commits kb makes. this is what the multi-day simulation relies on.
+#[test]
+fn kb_now_fixes_ulids_and_commit_dates() {
+    let dir = init_repo();
+    let repo = dir.path();
+    commit_all(repo, "init");
+    let when = "2027-01-15T09:30:00+00:00";
+
+    write(repo, "docs/a.md", "# dated note\n\nbody.\n");
+    kb_at(repo).env("KB_NOW", when).args(["check", "validate", "--fix", "--no-classify", "docs/a.md"]).assert().success();
+    let file = md_files(&repo.join("docs")).into_iter().next().expect("renamed note");
+    let id = file.file_stem().unwrap().to_str().unwrap().to_string();
+    let ulid = ulid::Ulid::from_string(&id).unwrap();
+    assert_eq!(ulid.timestamp_ms(), chrono::DateTime::parse_from_rfc3339(when).unwrap().timestamp_millis() as u64);
+
+    let out = kb_at(repo).env("KB_NOW", when).args(["session", "open", "--objective", "dated"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let worktree = text.lines().last().unwrap().trim().to_string();
+    let session_id = Path::new(&worktree).file_name().unwrap().to_str().unwrap().to_string();
+    write(Path::new(&worktree), "docs/b.md", "# second\n\nbody.\n");
+    kb_at(repo).env("KB_NOW", when).args(["session", "settle", &session_id, "-m", "dated settle"]).assert().success();
+    let date = kb::git::run(Path::new(&worktree), &["log", "-1", "--format=%cI"]).unwrap();
+    assert_eq!(date.trim(), "2027-01-15T09:30:00+00:00");
+}

@@ -88,7 +88,7 @@ fn record_backup(cfg: &Config, kind: &str, commit: &str, location: &str, sha256:
     let conn = open_backup_db(cfg)?;
     conn.execute(
         "insert into backups (kind, commit_sha, location, sha256, ts) values (?1,?2,?3,?4,?5)",
-        rusqlite::params![kind, commit, location, sha256, Utc::now().to_rfc3339()],
+        rusqlite::params![kind, commit, location, sha256, crate::clock::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -154,7 +154,7 @@ fn parse_bundle_stamp(path: &Path) -> Option<DateTime<Utc>> {
 /// first full bundle of each calendar month kept 3 years.
 fn apply_bundle_retention(dir: &Path) -> Result<()> {
     let bundles = list_bundle_files(dir)?;
-    let now = Utc::now();
+    let now = crate::clock::now();
     let mut months_kept: HashSet<(i32, u32)> = HashSet::new();
     for path in &bundles {
         let Some(stamp) = parse_bundle_stamp(path) else { continue };
@@ -217,7 +217,7 @@ pub fn run(cfg: &Config, kind: BackupKind) -> Result<BackupReport> {
                         None => ("full", vec!["--all".to_string()]),
                     }
                 };
-                let stamp = Utc::now().format("%Y%m%d-%H%M").to_string();
+                let stamp = crate::clock::now().format("%Y%m%d-%H%M").to_string();
                 let filename = format!("kb-{stamp}-{file_kind}.bundle");
                 let path = dir.join(&filename);
                 let revs_ref: Vec<&str> = revs.iter().map(String::as_str).collect();

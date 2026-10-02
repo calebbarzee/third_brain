@@ -42,11 +42,11 @@ pub fn tick(cfg: &Config) -> Result<TickReport> {
             continue;
         }
         let stale = chrono::DateTime::parse_from_rfc3339(&s.touched_at)
-            .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_minutes() > 10)
+            .map(|t| (crate::clock::now() - t.with_timezone(&chrono::Utc)).num_minutes() > 10)
             .unwrap_or(false);
         if stale {
             s.state = SessionState::Settled;
-            s.touched_at = chrono::Utc::now().to_rfc3339();
+            s.touched_at = crate::clock::now().to_rfc3339();
             session::save(cfg, &s)?;
             report.settled_stale_merging += 1;
         }
@@ -114,7 +114,7 @@ pub fn tick(cfg: &Config) -> Result<TickReport> {
     std::fs::create_dir_all(cfg.state_dir())?;
     std::fs::write(
         cfg.state_dir().join("last_tick"),
-        chrono::Utc::now().to_rfc3339(),
+        crate::clock::now().to_rfc3339(),
     )?;
     Ok(report)
 }

@@ -184,7 +184,7 @@ pub fn put_capture(cfg: &Config, req: PutCapture) -> Result<Capture> {
     }
 
     let capture_id = new_ulid();
-    let captured_at = req.captured_at.clone().unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let captured_at = req.captured_at.clone().unwrap_or_else(|| crate::clock::now().to_rfc3339());
     let status = if quarantined { "quarantined" } else { "new" };
     conn.execute(
         "insert into captures (capture_id, source, source_uri, source_cursor, captured_at, media_type, sha256_original, sha256_text, normalizer_version, title, status) \
@@ -227,7 +227,7 @@ pub fn set_cursor(cfg: &Config, source: &str, cursor: &str) -> Result<()> {
     conn.execute(
         "insert into source_cursors (source, cursor, updated_at) values (?1, ?2, ?3) \
          on conflict(source) do update set cursor = excluded.cursor, updated_at = excluded.updated_at",
-        params![source, cursor, chrono::Utc::now().to_rfc3339()],
+        params![source, cursor, crate::clock::now().to_rfc3339()],
     )?;
     Ok(())
 }
