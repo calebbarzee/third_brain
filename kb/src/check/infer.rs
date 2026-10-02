@@ -184,13 +184,12 @@ fn section_diff(base: &Document, head: &Document) -> BodyChange {
     }
 
     // same heading set and order: either one section changed (revise) or several did (rewrite).
+    // sections compare by their own text, so a subsection edit does not also count its parents.
     if base_paths == head_paths {
-        let changed: Vec<&str> = base
-            .sections
-            .iter()
-            .zip(head.sections.iter())
-            .filter(|(b, h)| base.body[b.start..b.end].trim_end() != head.body[h.start..h.end].trim_end())
-            .map(|(_, h)| h.path.as_str())
+        let own = crate::parse::body::own_text;
+        let changed: Vec<&str> = (0..base.sections.len())
+            .filter(|&i| own(&base.body, &base.sections, i) != own(&head.body, &head.sections, i))
+            .map(|i| head.sections[i].path.as_str())
             .collect();
         return match changed.len() {
             1 => BodyChange::ReviseSection(changed[0].to_string()),
@@ -246,6 +245,18 @@ mod tests {
         let ops = infer(Some(&b), Some(&h));
         assert_eq!(ops.len(), 1, "{ops:?}");
         assert_eq!(ops[0].op, Operation::Append, "{ops:?}");
+    }
+
+    /// notes start with an `# title`, so every section is a child of it; editing one subsection
+    /// is a revise of that subsection, not a rewrite of the title section.
+    #[test]
+    fn editing_one_subsection_is_a_revise_of_it() {
+        let b = doc(&format!("{HEAD_FM}# t\n\nintro\n\n## steps\n\nold step\n\n## notes\n\nkeep\n"));
+        let h = doc(&format!("{HEAD_FM}# t\n\nintro\n\n## steps\n\nnew step\n\n## notes\n\nkeep\n"));
+        let ops = infer(Some(&b), Some(&h));
+        assert_eq!(ops.len(), 1, "{ops:?}");
+        assert_eq!(ops[0].op, Operation::Revise, "{ops:?}");
+        assert_eq!(ops[0].section.as_deref(), Some("t/steps"), "{ops:?}");
     }
 
     #[test]

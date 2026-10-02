@@ -69,6 +69,16 @@ pub fn diff_key(path: &str) -> &str {
     if path == "_body" { "_preamble" } else { path }
 }
 
+/// the text a section holds itself: its heading and content up to the next heading of any level,
+/// without its subsections. a diff compares sections by this, so an edit to a subsection does not
+/// also mark every enclosing section changed. `sections` must be in document order, as
+/// `parse_body` returns them.
+pub fn own_text<'a>(body: &'a str, sections: &[Section], index: usize) -> &'a str {
+    let s = &sections[index];
+    let end = sections.get(index + 1).map_or(s.end, |next| next.start.min(s.end));
+    body[s.start..end.max(s.start)].trim_end()
+}
+
 pub fn parse_body(body: &str) -> BodyParse {
     struct Head {
         level: u8,

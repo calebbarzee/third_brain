@@ -227,8 +227,9 @@ fn compute_structure(base: Option<&Document>, head: Option<&Document>) -> DocStr
     let head_parse = crate::parse::parse_body(head_body);
 
     let key = crate::parse::body::diff_key;
-    let base_map: HashMap<&str, &str> = base_parse.sections.iter().map(|s| (key(&s.path), base_body[s.start..s.end].trim_end())).collect();
-    let head_map: HashMap<&str, &str> = head_parse.sections.iter().map(|s| (key(&s.path), head_body[s.start..s.end].trim_end())).collect();
+    let own = crate::parse::body::own_text;
+    let base_map: HashMap<&str, &str> = base_parse.sections.iter().enumerate().map(|(i, s)| (key(&s.path), own(base_body, &base_parse.sections, i))).collect();
+    let head_map: HashMap<&str, &str> = head_parse.sections.iter().enumerate().map(|(i, s)| (key(&s.path), own(head_body, &head_parse.sections, i))).collect();
 
     let mut sections_added = Vec::new();
     let mut sections_changed = Vec::new();
@@ -489,6 +490,16 @@ mod tests {
         assert!(s.sections_removed.is_empty(), "{:?}", s.sections_removed);
         assert!(s.sections_changed.is_empty(), "{:?}", s.sections_changed);
         assert_eq!(s.sections_added, vec!["laptop-side".to_string()]);
+    }
+
+    #[test]
+    fn a_subsection_edit_changes_only_that_subsection() {
+        let fm = "+++\nid = \"01K5A7Q2XW3ZRCM8T6YB4VJH0N\"\nlayer = \"reference\"\ntitle = \"t\"\nstatus = \"draft\"\nagent_policy = \"editable\"\nowner = \"caleb\"\n+++\n\n";
+        let base = crate::parse::parse_document(&format!("{fm}# t\n\nintro\n\n## steps\n\nold step\n\n## notes\n\nkeep\n")).unwrap();
+        let head = crate::parse::parse_document(&format!("{fm}# t\n\nintro\n\n## steps\n\nnew step\n\n## notes\n\nkeep\n")).unwrap();
+        let s = compute_structure(Some(&base), Some(&head));
+        assert_eq!(s.sections_changed, vec!["t/steps".to_string()]);
+        assert!(s.sections_added.is_empty() && s.sections_removed.is_empty());
     }
 
     fn write_doc(id: &str, title: &str, body_extra: &str) -> String {
