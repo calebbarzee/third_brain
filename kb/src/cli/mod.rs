@@ -18,6 +18,7 @@ pub mod schedule;
 pub mod serve;
 pub mod session;
 pub mod status;
+pub mod transcript;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -111,6 +112,9 @@ pub enum Command {
     /// llm provider commands: test connectivity, run classify on one file
     #[command(subcommand)]
     Provider(provider::ProviderCommand),
+    /// full transcripts of every model call and mcp tool call
+    #[command(subcommand)]
+    Transcript(transcript::TranscriptCommand),
     /// land a session on main: rebase, checks, structure gate, content review, fast-forward
     Merge {
         session: String,
@@ -340,6 +344,10 @@ pub fn run(cli: Cli) -> anyhow::Result<i32> {
         Command::Run(cmd) => {
             let cfg = load_config(&cli.repo)?;
             run::run(&cfg, cmd, cli.json)
+        }
+        Command::Transcript(cmd) => {
+            let cfg = load_config(&cli.repo)?;
+            transcript::run(&cfg, cmd, cli.json)
         }
         Command::Session(cmd) => {
             let cfg = load_config(&cli.repo)?;

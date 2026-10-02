@@ -48,4 +48,5 @@ pub mod backup;
 pub mod import;
 pub mod schedule;
 pub mod status;
+pub mod transcript;
 pub mod cli;

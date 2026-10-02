@@ -144,7 +144,32 @@ fn handle_tools_call(cfg: &Config, principal: &str, reader_groups: &[String], pa
     Ok(json!({"content": [{"type": "text", "text": text}]}))
 }
 
+/// run one tool and record the call, arguments and result in full, in the transcripts table.
 fn call_tool(cfg: &Config, principal: &str, reader_groups: &[String], name: &str, args: &Value) -> Result<Value> {
+    let started = crate::clock::now();
+    let clock = std::time::Instant::now();
+    let result = dispatch_tool(cfg, principal, reader_groups, name, args);
+    let entry = crate::transcript::Entry {
+        kind: "mcp",
+        role: name,
+        provider: None,
+        model: None,
+        actor: &format!("agent:mcp@{principal}"),
+        request: args.clone(),
+        response: result.as_ref().ok().cloned(),
+        error: result.as_ref().err().map(|e| format!("{e:#}")),
+        started,
+        duration_ms: clock.elapsed().as_millis() as u64,
+        input_tokens: None,
+        output_tokens: None,
+    };
+    if let Err(e) = crate::transcript::record(&cfg.state_dir(), entry) {
+        eprintln!("warning: could not record the mcp `{name}` transcript: {e:#}");
+    }
+    result
+}
+
+fn dispatch_tool(cfg: &Config, principal: &str, reader_groups: &[String], name: &str, args: &Value) -> Result<Value> {
     let reader = handlers::Reader::new(cfg, principal);
     match name {
         "search" => {

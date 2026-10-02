@@ -144,6 +144,9 @@ pub struct RunLog {
     path: PathBuf,
     /// hash of the most recently written event; the chain's genesis value before any event exists.
     prev_hash: String,
+    /// attributes model calls on this thread to this run until the log is sealed or dropped;
+    /// `None` for a log opened read-only.
+    _transcript_run: Option<crate::transcript::RunGuard>,
 }
 
 fn runs_dir(cfg: &Config) -> PathBuf {
@@ -236,7 +239,8 @@ impl RunLog {
         )
         .context("inserting run row")?;
 
-        let mut log = RunLog { conn, run_id: run_id.clone(), path, prev_hash: genesis_hash(&run_id) };
+        let transcript_run = crate::transcript::enter_run(&run_id, &start.actor, start.session_id.as_deref());
+        let mut log = RunLog { conn, run_id: run_id.clone(), path, prev_hash: genesis_hash(&run_id), _transcript_run: Some(transcript_run) };
         log.log(
             EventKind::RunStart,
             serde_json::json!({
@@ -267,7 +271,7 @@ impl RunLog {
         let prev_hash: String = conn
             .query_row("select hash from event where run_id = ?1 order by seq desc limit 1", params![run_id], |r| r.get(0))
             .unwrap_or_else(|_| genesis_hash(&run_id));
-        Ok(RunLog { conn, run_id, path, prev_hash })
+        Ok(RunLog { conn, run_id, path, prev_hash, _transcript_run: None })
     }
 
     pub fn run_id(&self) -> &str {

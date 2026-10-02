@@ -45,10 +45,12 @@ pub enum TokenCommand {
 pub fn run(cfg: &Config, cmd: ServeCommand, json: bool) -> Result<i32> {
     match cmd {
         ServeCommand::Serve { bind, no_auth, tick_seconds, read_only } => {
+            crate::transcript::set_default_trigger("http");
             server::serve_blocking(cfg.clone(), ServeOpts { bind, no_auth, tick_seconds, read_only })?;
             Ok(0)
         }
         ServeCommand::Mcp => {
+            crate::transcript::set_default_trigger("mcp:stdio");
             server::mcp::run_stdio(cfg)?;
             Ok(0)
         }

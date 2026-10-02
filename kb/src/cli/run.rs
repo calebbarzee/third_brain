@@ -112,7 +112,7 @@ fn run_search(cfg: &Config, id: &str, needle: &str, json: bool) -> Result<i32> {
 }
 
 /// parse a duration like `24h`, `7d`, `30m`, `45s`.
-fn parse_duration(s: &str) -> Result<Duration> {
+pub(crate) fn parse_duration(s: &str) -> Result<Duration> {
     let s = s.trim();
     if s.len() < 2 {
         bail!("duration `{s}` must look like `24h`, `7d`, or `30m`");

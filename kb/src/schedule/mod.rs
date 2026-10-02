@@ -68,8 +68,12 @@ pub fn instance_name(root: &Path) -> String {
     if sanitized.is_empty() { "kb".to_string() } else { sanitized }
 }
 
-fn oneshot_service(description: &str, working_dir: &Path, exec_start: &str) -> String {
-    format!("[Unit]\nDescription={description}\n\n[Service]\nType=oneshot\nWorkingDirectory={}\nExecStart={exec_start}\n", working_dir.display())
+/// `trigger` becomes `KB_TRIGGER`, which every transcript row records (`crate::transcript`).
+fn oneshot_service(description: &str, trigger: &str, working_dir: &Path, exec_start: &str) -> String {
+    format!(
+        "[Unit]\nDescription={description}\n\n[Service]\nType=oneshot\nWorkingDirectory={}\nEnvironment=KB_TRIGGER={trigger}\nExecStart={exec_start}\n",
+        working_dir.display()
+    )
 }
 
 fn timer(description: &str, on_calendar: Option<&str>, on_active_sec: Option<u32>) -> String {
@@ -132,7 +136,7 @@ pub fn render(cfg: &Config, bin: &Path, opts: &ScheduleOptions) -> Result<Render
     // tick: a template service (one instance per repository) plus a concrete timer for it.
     units.push(Unit {
         name: "kb-tick@.service".to_string(),
-        content: oneshot_service("kb reconciliation tick (%i)", root, &format!("{} --repo {} tick", bin.display(), root.display())),
+        content: oneshot_service("kb reconciliation tick (%i)", "timer:tick", root, &format!("{} --repo {} tick", bin.display(), root.display())),
     });
     units.push(Unit {
         name: format!("kb-tick@{instance}.timer"),
@@ -142,7 +146,7 @@ pub fn render(cfg: &Config, bin: &Path, opts: &ScheduleOptions) -> Result<Render
     // capture: pull every configured source into the content store.
     units.push(Unit {
         name: "kb-capture.service".to_string(),
-        content: oneshot_service("kb archive capture", root, &format!("{} --repo {} archive capture", bin.display(), root.display())),
+        content: oneshot_service("kb archive capture", "timer:capture", root, &format!("{} --repo {} archive capture", bin.display(), root.display())),
     });
     units.push(Unit {
         name: "kb-capture.timer".to_string(),
@@ -155,7 +159,7 @@ pub fn render(cfg: &Config, bin: &Path, opts: &ScheduleOptions) -> Result<Render
     let eod_calendar = on_calendar_daily(&opts.eod).with_context(|| format!("`--eod {}` is not `HH:MM`", opts.eod))?;
     units.push(Unit {
         name: "kb-eod.service".to_string(),
-        content: oneshot_service("kb end of day: settle and merge", root, &format!("/bin/sh {}", schedule_dir(cfg).join(EOD_MERGE_SCRIPT).display())),
+        content: oneshot_service("kb end of day: settle and merge", "timer:eod", root, &format!("/bin/sh {}", schedule_dir(cfg).join(EOD_MERGE_SCRIPT).display())),
     });
     units.push(Unit { name: "kb-eod.timer".to_string(), content: timer(&format!("kb eod daily at {}", opts.eod), Some(&eod_calendar), None) });
 
@@ -164,7 +168,7 @@ pub fn render(cfg: &Config, bin: &Path, opts: &ScheduleOptions) -> Result<Render
     let nightly_calendar = on_calendar_daily(&opts.nightly).with_context(|| format!("`--nightly {}` is not `HH:MM`", opts.nightly))?;
     units.push(Unit {
         name: "kb-nightly.service".to_string(),
-        content: oneshot_service("kb nightly curation", root, &format!("{} --repo {} maintain nightly", bin.display(), root.display())),
+        content: oneshot_service("kb nightly curation", "timer:nightly", root, &format!("{} --repo {} maintain nightly", bin.display(), root.display())),
     });
     units.push(Unit { name: "kb-nightly.timer".to_string(), content: timer(&format!("kb maintain nightly daily at {}", opts.nightly), Some(&nightly_calendar), None) });
 
@@ -172,13 +176,13 @@ pub fn render(cfg: &Config, bin: &Path, opts: &ScheduleOptions) -> Result<Render
     // built as of this writing; see this crate's report.
     units.push(Unit {
         name: "kb-backup.service".to_string(),
-        content: oneshot_service("kb hourly backup bundle", root, &format!("{} --repo {} backup run --kind bundle", bin.display(), root.display())),
+        content: oneshot_service("kb hourly backup bundle", "timer:backup", root, &format!("{} --repo {} backup run --kind bundle", bin.display(), root.display())),
     });
     units.push(Unit { name: "kb-backup.timer".to_string(), content: timer("kb backup bundle hourly", None, Some(3600)) });
     let backup_calendar = on_calendar_daily(&opts.backup_full_at).with_context(|| format!("`--backup-full-at {}` is not `HH:MM`", opts.backup_full_at))?;
     units.push(Unit {
         name: "kb-backup-full.service".to_string(),
-        content: oneshot_service("kb daily full backup", root, &format!("{} --repo {} backup run --kind bundle-full", bin.display(), root.display())),
+        content: oneshot_service("kb daily full backup", "timer:backup-full", root, &format!("{} --repo {} backup run --kind bundle-full", bin.display(), root.display())),
     });
     units.push(Unit {
         name: "kb-backup-full.timer".to_string(),

@@ -113,7 +113,7 @@ pub const PRE_COMMIT_TEMPLATE: &str = r#"#!/bin/sh
 # KB_BIN overrides the binary; otherwise `kb` on PATH, otherwise the binary that installed this hook.
 set -e
 KB="${KB_BIN:-$(command -v kb 2>/dev/null || echo "__KB_PATH__")}"
-"$KB" check validate --fix --staged || exit 1
+KB_TRIGGER=hook:pre-commit "$KB" check validate --fix --staged || exit 1
 "$KB" check secrets --staged || exit 1
 "#;
 

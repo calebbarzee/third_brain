@@ -126,8 +126,22 @@ fn maybe_classify(cfg: &Config, fix: bool, no_classify: bool, outcome: &mut chec
     if !fix || no_classify || check::missing_classifiable(&outcome.document.frontmatter).is_empty() {
         return Ok(());
     }
-    let Some(suggestion) = crate::provider::classify::classify(cfg, &outcome.document, &[])? else {
-        return Ok(());
+    // design.md §6: after the retries the deterministic defaults apply. a failing or offline
+    // classifier must never block a commit, so its error becomes a warning.
+    let suggestion = match crate::provider::classify::classify(cfg, &outcome.document, &[]) {
+        Ok(Some(s)) => s,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            outcome.findings.push(Finding {
+                severity: Severity::Warning,
+                code: "classify-failed".into(),
+                message: format!("classify failed, deterministic defaults kept: {e:#}"),
+                path: Some(outcome.path.display().to_string()),
+                line: None,
+                doc_id: outcome.document.frontmatter.id.clone(),
+            });
+            return Ok(());
+        }
     };
     let filled = crate::provider::classify::apply_classification(&mut outcome.document.frontmatter, &suggestion);
     if filled.is_empty() {

@@ -107,6 +107,17 @@ pub fn provider_for_role(cfg: &Config, role: &str) -> Result<Option<Box<dyn Prov
     let Some(pc) = cfg.kb.providers.get(role) else {
         return Ok(None);
     };
+    let inner = build_provider(role, pc)?;
+    Ok(Some(Box::new(Traced {
+        inner,
+        role: role.to_string(),
+        model: pc.model.clone(),
+        state_dir: cfg.state_dir(),
+        actor: format!("human:{}", crate::server::auth::local_principal(cfg)),
+    })))
+}
+
+fn build_provider(role: &str, pc: &crate::config::ProviderConfig) -> Result<Box<dyn Provider>> {
     let provider: Box<dyn Provider> = match pc.kind.as_str() {
         "anthropic" => Box::new(anthropic::AnthropicProvider::new(pc)?),
         "openai" => Box::new(openai::OpenAiProvider::new(pc)?),
@@ -117,7 +128,72 @@ pub fn provider_for_role(cfg: &Config, role: &str) -> Result<Option<Box<dyn Prov
             "role \"{role}\": unknown provider kind \"{other}\" (expected anthropic, openai, ollama, claude-code, or command)"
         ),
     };
-    Ok(Some(provider))
+    Ok(provider)
+}
+
+/// a provider that writes every completion, request and response in full, to the transcripts
+/// table (`crate::transcript`). embed and rerank pass through unrecorded: they carry vectors and
+/// scores, not conversation.
+struct Traced {
+    inner: Box<dyn Provider>,
+    role: String,
+    model: String,
+    state_dir: std::path::PathBuf,
+    actor: String,
+}
+
+impl Provider for Traced {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse> {
+        let started = crate::clock::now();
+        let clock = std::time::Instant::now();
+        let result = self.inner.complete(req);
+        let request = serde_json::json!({
+            "system": req.system, "messages": req.messages, "max_tokens": req.max_tokens,
+            "temperature": req.temperature, "json_schema": req.json_schema,
+        });
+        let (response, error, usage) = match &result {
+            Ok(resp) => (serde_json::to_value(resp).ok(), None, Some(resp.usage)),
+            Err(e) => (None, Some(format!("{e:#}")), None),
+        };
+        let entry = crate::transcript::Entry {
+            kind: "llm",
+            role: &self.role,
+            provider: Some(self.inner.name()),
+            model: (!self.model.is_empty()).then_some(self.model.as_str()),
+            actor: &self.actor,
+            request,
+            response,
+            error,
+            started,
+            duration_ms: clock.elapsed().as_millis() as u64,
+            input_tokens: usage.map(|u| u.input_tokens),
+            output_tokens: usage.map(|u| u.output_tokens),
+        };
+        if let Err(e) = crate::transcript::record(&self.state_dir, entry) {
+            eprintln!("warning: could not record the {} transcript: {e:#}", self.role);
+        }
+        result
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.inner.embed(texts)
+    }
+
+    fn supports_embed(&self) -> bool {
+        self.inner.supports_embed()
+    }
+
+    fn rerank(&self, query: &str, candidates: &[String]) -> Result<Vec<f64>> {
+        self.inner.rerank(query, candidates)
+    }
+
+    fn supports_rerank(&self) -> bool {
+        self.inner.supports_rerank()
+    }
 }
 
 /// the first text block in a response, if any.
