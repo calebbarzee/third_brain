@@ -391,7 +391,12 @@ pub fn run_with_provider(cfg: &Config, input: CurateInput, provider_override: Op
     }
 
     let why = justifications.iter().map(|j| format!("- {j}")).collect::<Vec<_>>().join("\n");
-    let message = if why.is_empty() { output.summary.clone() } else { format!("{}\n\n{why}", output.summary) };
+    let mut message = if why.is_empty() { output.summary.clone() } else { format!("{}\n\n{why}", output.summary) };
+    // escalations change no file; naming them here keeps a reviewer from looking for them in the diff
+    if !escalations.is_empty() {
+        let listed = escalations.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n");
+        message.push_str(&format!("\n\nescalated to a person, no file change:\n{listed}"));
+    }
     let settled_commits = if applied_list.is_empty() { vec![] } else { session::settle(cfg, &mut session, Some(&message))? };
 
     log.settle(&settled_commits)?;

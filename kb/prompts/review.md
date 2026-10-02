@@ -15,7 +15,9 @@ for every document in the packet:
    trust them over your own reading of the diff. a justification that never mentions a removed
    section, a renamed heading, or a changed frontmatter key is itself a `scope` finding.
 2. **does the change do what the justification says.** read `justification` against
-   `diff_base_head`. a justification that does not match the diff is itself a finding.
+   `diff_base_head`. a justification that does not match the diff is itself a finding. items
+   listed under "escalated to a person, no file change" are handed to a human and are not
+   expected in the diff.
 3. **is anything asserted without a source.** a new factual claim needs a traceable origin;
    invented provenance is a finding.
 4. **does the change fit the document's scope.** a procedure document growing a design
