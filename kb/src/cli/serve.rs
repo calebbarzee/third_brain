@@ -19,6 +19,9 @@ pub enum ServeCommand {
         /// reconciliation tick interval; 0 disables the background tick thread
         #[arg(long, default_value_t = 60)]
         tick_seconds: u64,
+        /// serve reads only: propose, the webhooks, and the mcp propose tool are refused
+        #[arg(long)]
+        read_only: bool,
     },
     /// run the mcp server over stdio, under the current git identity's principal
     Mcp,
@@ -41,8 +44,8 @@ pub enum TokenCommand {
 
 pub fn run(cfg: &Config, cmd: ServeCommand, json: bool) -> Result<i32> {
     match cmd {
-        ServeCommand::Serve { bind, no_auth, tick_seconds } => {
-            server::serve_blocking(cfg.clone(), ServeOpts { bind, no_auth, tick_seconds })?;
+        ServeCommand::Serve { bind, no_auth, tick_seconds, read_only } => {
+            server::serve_blocking(cfg.clone(), ServeOpts { bind, no_auth, tick_seconds, read_only })?;
             Ok(0)
         }
         ServeCommand::Mcp => {

@@ -16,7 +16,7 @@ fn start_no_auth() -> (tempfile::TempDir, server::ServerHandle) {
     kb::git::run(dir.path(), &["config", "user.email", "test@example.com"]).unwrap();
     std::fs::create_dir_all(dir.path().join(".kb/store/blobs")).unwrap();
     let cfg = Config::load(dir.path()).unwrap();
-    let handle = server::start(cfg, ServeOpts { bind: "127.0.0.1:0".to_string(), no_auth: true, tick_seconds: 0 }).unwrap();
+    let handle = server::start(cfg, ServeOpts { bind: "127.0.0.1:0".to_string(), no_auth: true, ..ServeOpts::default() }).unwrap();
     (dir, handle)
 }
 
@@ -129,7 +129,7 @@ fn access_read_is_enforced_for_search_get_and_docs() {
     kb::git::commit_all(root, "seed").unwrap();
     let cfg = Config::load(root).unwrap();
     kb::index::build(&cfg, None).unwrap();
-    let handle = server::start(cfg.clone(), ServeOpts { bind: "127.0.0.1:0".to_string(), no_auth: false, tick_seconds: 0 }).unwrap();
+    let handle = server::start(cfg.clone(), ServeOpts { bind: "127.0.0.1:0".to_string(), no_auth: false, ..ServeOpts::default() }).unwrap();
     let addr = handle.addr();
     let ana = kb::server::auth::issue(&cfg, "ana").unwrap();
     let caleb = kb::server::auth::issue(&cfg, "caleb").unwrap();
@@ -144,5 +144,24 @@ fn access_read_is_enforced_for_search_get_and_docs() {
     let (_, body) = as_user(&caleb, "/search?q=zebra");
     assert!(body.contains(secret), "a group member must see the restricted document:\n{body}");
     assert_eq!(as_user(&caleb, &format!("/doc/{secret}")).0, 200);
+    handle.shutdown();
+}
+
+#[test]
+fn read_only_refuses_every_write_route() {
+    let dir = tempfile::tempdir().unwrap();
+    kb::cli::init::init(dir.path(), false, false).unwrap();
+    let cfg = Config::load(dir.path()).unwrap();
+    let handle = server::start(cfg, ServeOpts { bind: "127.0.0.1:0".to_string(), no_auth: true, read_only: true, ..ServeOpts::default() }).unwrap();
+    let addr = handle.addr();
+    let post = |path: &str, body: &str| {
+        raw(addr, &format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}", addr.port(), body.len()), body.as_bytes())
+    };
+    assert_eq!(post("/propose", r#"{"task":"t","text":"x"}"#).0, 403);
+    assert_eq!(post("/webhook/source/x", "{}").0, 403);
+    let (status, body) = post("/mcp", r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"propose","arguments":{"task":"t","text":"x"}}}"#);
+    assert_eq!(status, 200);
+    assert!(body.contains("read-only"), "{body}");
+    assert_eq!(get(addr, "/health").0, 200);
     handle.shutdown();
 }

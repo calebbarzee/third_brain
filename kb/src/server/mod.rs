@@ -26,11 +26,14 @@ use std::time::{Duration, Instant};
 use tiny_http::Server;
 
 /// `kb serve`'s options (design.md §29 step 6).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ServeOpts {
     pub bind: String,
     pub no_auth: bool,
     pub tick_seconds: u64,
+    /// serve reads only: search, get, refs, docs, answer, runs, review, blob. `propose`, the
+    /// webhooks, and the mcp `propose` tool answer 403.
+    pub read_only: bool,
 }
 
 /// size of the blocking request thread pool (task's constraint: "a small thread pool of 8").
@@ -94,7 +97,8 @@ pub fn start(cfg: Config, opts: ServeOpts) -> Result<ServerHandle> {
         let cfg = Arc::clone(&cfg);
         let auth_mode = auth_mode.clone();
         let shutdown_flag = Arc::clone(&shutdown_flag);
-        workers.push(std::thread::spawn(move || worker_loop(&server, &cfg, &auth_mode, &shutdown_flag)));
+        let read_only = opts.read_only;
+        workers.push(std::thread::spawn(move || worker_loop(&server, &cfg, &auth_mode, read_only, &shutdown_flag)));
     }
 
     let tick_thread = if opts.tick_seconds > 0 {
@@ -171,7 +175,7 @@ mod libc_sigint {
     }
 }
 
-fn worker_loop(server: &Server, cfg: &Config, auth_mode: &auth::AuthMode, shutdown_flag: &AtomicBool) {
+fn worker_loop(server: &Server, cfg: &Config, auth_mode: &auth::AuthMode, read_only: bool, shutdown_flag: &AtomicBool) {
     while !shutdown_flag.load(Ordering::SeqCst) {
         match server.recv_timeout(Duration::from_millis(200)) {
             Ok(Some(request)) => {
@@ -180,7 +184,7 @@ fn worker_loop(server: &Server, cfg: &Config, auth_mode: &auth::AuthMode, shutdo
                 let path = request.url().split('?').next().unwrap_or("").to_string();
                 // a panic in one handler must not take this worker thread with it; the dropped
                 // request is answered 500 by tiny_http.
-                let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rest::handle(cfg, auth_mode, request)));
+                let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rest::handle(cfg, auth_mode, read_only, request)));
                 let ms = start.elapsed().as_millis();
                 match handled {
                     Ok((status, principal)) => eprintln!("{method} {path} {principal} {status} {ms}ms"),
@@ -216,7 +220,7 @@ mod tests {
     fn no_auth_rejects_a_non_loopback_bind() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config::load(dir.path()).unwrap();
-        let opts = ServeOpts { bind: "0.0.0.0:0".to_string(), no_auth: true, tick_seconds: 0 };
+        let opts = ServeOpts { bind: "0.0.0.0:0".to_string(), no_auth: true, ..ServeOpts::default() };
         assert!(start(cfg, opts).is_err());
     }
 
@@ -224,7 +228,7 @@ mod tests {
     fn start_binds_an_ephemeral_port_and_shuts_down() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config::load(dir.path()).unwrap();
-        let opts = ServeOpts { bind: "127.0.0.1:0".to_string(), no_auth: true, tick_seconds: 0 };
+        let opts = ServeOpts { bind: "127.0.0.1:0".to_string(), no_auth: true, ..ServeOpts::default() };
         let handle = start(cfg, opts).unwrap();
         assert_ne!(handle.addr().port(), 0);
         handle.shutdown();

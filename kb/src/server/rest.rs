@@ -21,7 +21,7 @@ use tiny_http::{Header, Request, Response};
 
 /// handle one request end to end: authenticate, route, respond. returns `(status, principal)`
 /// for the caller's one-line-per-request log (`"-"` when authentication itself failed).
-pub fn handle(cfg: &Config, mode: &AuthMode, request: Request) -> (u16, String) {
+pub fn handle(cfg: &Config, mode: &AuthMode, read_only: bool, request: Request) -> (u16, String) {
     let method = request.method().as_str().to_string();
     let url = request.url().to_string();
     let (path, query) = split_query(&url);
@@ -45,7 +45,11 @@ pub fn handle(cfg: &Config, mode: &AuthMode, request: Request) -> (u16, String) 
         }
     };
 
-    let status = route(cfg, &principal, &method, &path, &query, request);
+    if read_only && method == "POST" && (path == "/propose" || path.starts_with("/webhook/")) {
+        let status = respond_json(request, 403, json!({"error": "this server is read-only"}));
+        return (status, principal);
+    }
+    let status = route(cfg, &principal, &method, &path, &query, read_only, request);
     (status, principal)
 }
 
@@ -106,7 +110,7 @@ fn authenticate(cfg: &Config, mode: &AuthMode, request: &Request) -> Option<Stri
     }
 }
 
-fn route(cfg: &Config, principal: &str, method: &str, path: &str, query: &HashMap<String, String>, request: Request) -> u16 {
+fn route(cfg: &Config, principal: &str, method: &str, path: &str, query: &HashMap<String, String>, read_only: bool, request: Request) -> u16 {
     let decoded: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
     let seg: Vec<&str> = decoded.iter().map(String::as_str).collect();
     let reader = handlers::Reader::new(cfg, principal);
@@ -124,7 +128,7 @@ fn route(cfg: &Config, principal: &str, method: &str, path: &str, query: &HashMa
         ("GET", ["review"]) => respond_review(cfg, request),
         ("POST", ["webhook", "main-advanced"]) => respond_webhook_tick(cfg, request),
         ("POST", ["webhook", "source", name]) => respond_webhook_source(cfg, name, request),
-        ("POST", ["mcp"]) => respond_mcp(cfg, principal, request),
+        ("POST", ["mcp"]) => respond_mcp(cfg, principal, read_only, request),
         _ => respond_json(request, 404, json!({"error": format!("no route for {method} {path}")})),
     }
 }
@@ -281,12 +285,19 @@ fn respond_webhook_source(cfg: &Config, name: &str, mut request: Request) -> u16
     }
 }
 
-fn respond_mcp(cfg: &Config, principal: &str, mut request: Request) -> u16 {
+fn respond_mcp(cfg: &Config, principal: &str, read_only: bool, mut request: Request) -> u16 {
     let body = read_body(&mut request);
     let raw = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => return respond_json(request, 400, json!({"error": "request body was not valid utf-8"})),
     };
+    if read_only {
+        let msg: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        if msg["method"] == "tools/call" && msg["params"]["name"] == "propose" {
+            let reply = json!({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": "this server is read-only; propose is disabled"}});
+            return respond_json(request, 200, reply);
+        }
+    }
     let reader_groups = cfg.groups_of(principal);
     match super::mcp::handle_message(cfg, principal, &reader_groups, raw) {
         Some(reply) => {

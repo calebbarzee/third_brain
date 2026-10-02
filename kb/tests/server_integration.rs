@@ -42,7 +42,7 @@ fn seed_repo() -> (tempfile::TempDir, Config) {
 }
 
 fn start_server(cfg: &Config) -> server::ServerHandle {
-    server::start(cfg.clone(), ServeOpts { bind: "127.0.0.1:0".to_string(), no_auth: false, tick_seconds: 0 }).unwrap()
+    server::start(cfg.clone(), ServeOpts { bind: "127.0.0.1:0".to_string(), no_auth: false, ..ServeOpts::default() }).unwrap()
 }
 
 fn client() -> reqwest::blocking::Client {
@@ -206,6 +206,6 @@ fn webhook_source_stores_a_capture() {
 #[test]
 fn no_auth_mode_requires_a_loopback_bind() {
     let (_dir, cfg) = seed_repo();
-    let opts = ServeOpts { bind: "0.0.0.0:0".to_string(), no_auth: true, tick_seconds: 0 };
+    let opts = ServeOpts { bind: "0.0.0.0:0".to_string(), no_auth: true, ..ServeOpts::default() };
     assert!(server::start(cfg, opts).is_err());
 }
