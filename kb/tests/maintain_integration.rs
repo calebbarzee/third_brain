@@ -191,3 +191,39 @@ fn default_nightly_fixes_wait_for_a_person() {
         assert_eq!(s.state, kb::session::SessionState::Review, "{}", s.objective);
     }
 }
+
+/// the contradiction and bad-merged-change detectors re-review the same merged commits; each
+/// commit must reach the review model once per pass. counted from the transcripts table.
+#[test]
+fn nightly_reviews_each_merged_commit_once() {
+    let (dir, _draft_id) = seed_repo();
+    let root = dir.path();
+    let cfg = Config::load(root).unwrap();
+    for (i, id) in ["01K5A7Q2XW3ZRCM8T6YB4VJH1X", "01K5A7Q2XW3ZRCM8T6YB4VJH1Y"].iter().enumerate() {
+        let mut s = kb::session::open(&cfg, &format!("change {i}"), None, &[]).unwrap();
+        let doc = format!("+++\nid = \"{id}\"\nlayer = \"reference\"\ntitle = \"note {i}\"\nstatus = \"draft\"\nagent_policy = \"editable\"\nowner = \"caleb\"\n+++\n\n# note {i}\n\nbody {i}.\n");
+        std::fs::write(s.worktree.join("docs").join(format!("{id}.md")), doc).unwrap();
+        git::commit_all(&s.worktree, "wip").unwrap();
+        kb::session::settle(&cfg, &mut s, None).unwrap();
+        kb::merge::merge(&cfg, &s.id, kb::merge::MergeOpts::default()).unwrap();
+    }
+    let script = root.join(".kb-test-review.sh");
+    std::fs::write(&script, "#!/bin/sh\ncat > /dev/null\necho '{\"verdict\": \"approve\", \"confidence\": 0.9, \"findings\": [], \"summary\": \"fine\"}'\n").unwrap();
+    let mut perms = std::fs::metadata(&script).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&script, perms).unwrap();
+    let mut toml = std::fs::read_to_string(root.join("kb.toml")).unwrap();
+    toml.push_str(&format!("\n[providers.review]\nkind = \"command\"\nbase_url = \"{}\"\n", script.display()));
+    std::fs::write(root.join("kb.toml"), toml).unwrap();
+    let cfg = Config::load(root).unwrap();
+    kb::index::build(&cfg, None).unwrap();
+
+    maintain::nightly(&cfg, NightlyOpts { dry_run: true, since: None, only: None }).unwrap();
+
+    let rows = kb::transcript::list(&cfg, &kb::transcript::Filter { role: Some("review".into()), ..Default::default() }).unwrap();
+    assert!(!rows.is_empty(), "nightly should have re-reviewed the merged commits");
+    let mut seen = HashSet::new();
+    for r in &rows {
+        assert!(seen.insert(r.request.to_string()), "a commit was reviewed twice in one pass");
+    }
+}

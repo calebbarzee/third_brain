@@ -16,7 +16,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
@@ -134,11 +134,13 @@ pub fn detect(cfg: &Config, conn: &Connection, repo: &Path, since_commit: &str, 
     if want(FindingKind::Duplication) {
         out.extend(detect_duplication(conn, cfg)?);
     }
+    // both detectors re-review the same merged commits; each commit is reviewed once
+    let mut reviews: HashMap<String, Option<review::ReviewOutput>> = HashMap::new();
     if want(FindingKind::Contradiction) {
-        out.extend(detect_contradiction(cfg, repo, since_commit)?);
+        out.extend(detect_contradiction(cfg, repo, since_commit, &mut reviews)?);
     }
     if want(FindingKind::BadMergedChange) {
-        out.extend(detect_bad_merged_change(cfg, repo, since_commit, enabled)?);
+        out.extend(detect_bad_merged_change(cfg, repo, since_commit, enabled, &mut reviews)?);
     }
     Ok(out)
 }
@@ -665,15 +667,25 @@ fn doc_ids_touched(repo: &Path, base: &str, head: &str) -> Vec<String> {
     ids
 }
 
-fn detect_contradiction(cfg: &Config, repo: &Path, since_commit: &str) -> Result<Vec<Finding>> {
+/// the content review of one merged commit, from `cache` when this pass already asked.
+fn review_commit(cfg: &Config, repo: &Path, sha: &str, cache: &mut HashMap<String, Option<review::ReviewOutput>>) -> Option<review::ReviewOutput> {
+    cache
+        .entry(sha.to_string())
+        .or_insert_with(|| {
+            let input = review_input_for_commit(repo, sha);
+            review::review(cfg, &input).ok().flatten()
+        })
+        .clone()
+}
+
+fn detect_contradiction(cfg: &Config, repo: &Path, since_commit: &str, cache: &mut HashMap<String, Option<review::ReviewOutput>>) -> Result<Vec<Finding>> {
     let mut out = Vec::new();
     if provider::provider_for_role(cfg, "review")?.is_none() {
         return Ok(out);
     }
     let commits = git::log_shas_since(repo, since_commit, "main").unwrap_or_default();
     for sha in commits {
-        let input = review_input_for_commit(repo, &sha);
-        let Ok(Some(result)) = review::review(cfg, &input) else { continue };
+        let Some(result) = review_commit(cfg, repo, &sha, cache) else { continue };
         for f in &result.findings {
             if f.kind != review::FindingKind::Contradiction {
                 continue;
@@ -685,7 +697,7 @@ fn detect_contradiction(cfg: &Config, repo: &Path, since_commit: &str) -> Result
     Ok(out)
 }
 
-fn detect_bad_merged_change(cfg: &Config, repo: &Path, since_commit: &str, enabled: bool) -> Result<Vec<Finding>> {
+fn detect_bad_merged_change(cfg: &Config, repo: &Path, since_commit: &str, enabled: bool, cache: &mut HashMap<String, Option<review::ReviewOutput>>) -> Result<Vec<Finding>> {
     let mut out = Vec::new();
     if provider::provider_for_role(cfg, "review")?.is_none() {
         return Ok(out);
@@ -698,8 +710,7 @@ fn detect_bad_merged_change(cfg: &Config, repo: &Path, since_commit: &str, enabl
             // commit (including this detector's own revert-fix commits) is not in scope.
             continue;
         }
-        let input = review_input_for_commit(repo, &sha);
-        let Ok(Some(result)) = review::review(cfg, &input) else { continue };
+        let Some(result) = review_commit(cfg, repo, &sha, cache) else { continue };
         if result.verdict == review::Verdict::Approve {
             continue;
         }
