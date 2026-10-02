@@ -333,10 +333,10 @@ pub fn run_with_provider(cfg: &Config, input: CurateInput, provider_override: Op
 
     if input.dry_run {
         for op in &output.ops {
-            println!("{} target={:?} section={:?} confidence={:.2}: {}", op.op, op.target_id, op.section, op.confidence, op.justification);
+            eprintln!("{} target={:?} section={:?} confidence={:.2}: {}", op.op, op.target_id, op.section, op.confidence, op.justification);
         }
         for (id, reason) in &discards {
-            println!("discard {id}: {reason}");
+            eprintln!("discard {id}: {reason}");
         }
         log.report(&output.summary)?;
         log.run_end(RunStatus::Ok, None, None, Some(&output.summary), &[], &[])?;
@@ -400,7 +400,8 @@ pub fn run_with_provider(cfg: &Config, input: CurateInput, provider_override: Op
     log.seal(cfg)?;
 
     if !settled_commits.is_empty() {
-        println!("next: kb merge {}", session.id);
+        // a hint for a person; stdout stays reserved for the caller's `--json` report
+        eprintln!("next: kb merge {}", session.id);
     }
 
     Ok(CurateReport { run_id, session_id: Some(session.id.clone()), applied: applied_list, escalations, discards: discards.len(), deferred: false, settled_commits })

@@ -158,9 +158,14 @@ class Sim:
 
 	def kb_json(self, *args: str, **kw):
 		proc = self.kb_cmd("--json", *args, **kw)
+		text = proc.stdout
+		starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+		if not starts:
+			return None
 		try:
-			return json.loads(proc.stdout) if proc.stdout.strip() else None
+			return json.loads(text[min(starts) :])
 		except json.JSONDecodeError:
+			self.log("  (could not parse the json output above)")
 			return None
 
 	def git(self, *args: str, **kw) -> subprocess.CompletedProcess[str]:
@@ -512,8 +517,15 @@ glob = "**/*"
 	sim.git("commit", "-m", "configure the simulated knowledge base")
 	staging = sim.out / "fixtures"
 	shutil.copytree(fixtures, staging)
-	sim.kb_cmd("import", str(staging))
+	imported = sim.kb_cmd("import", str(staging))
+	match = re.search(r"session: (\S+)", imported.stdout)
+	if match and "not merged" in imported.stdout:
+		# the content reviewer may hold the import below its confidence threshold; a person approves it
+		approved = sim.kb_json("review", "approve", match.group(1)) or {}
+		sim.log(f"import held for review; approved by the simulated person, landed={approved.get('landed')}")
 	sim.map_ids()
+	if not sim.ids:
+		raise RuntimeError("import did not land any documents on main")
 	sim.log(f"documents: {json.dumps(sim.ids, indent=1)}")
 	for name in PROMOTE_TO_CANON:
 		sim.promote(name)
