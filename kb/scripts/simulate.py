@@ -316,15 +316,15 @@ class Sim:
 		night = day + dt.timedelta(days=1)
 		self.now = night.replace(hour=2)
 		self.section(f"generation {gen}: eod sweep")
-		eod = self.kb_json("eod") or {}
+		eod = self.kb_json("eod", extra_env={"KB_TRIGGER": "timer:eod"}) or {}
 		self.log(f"eod: {eod}")
 		for row in self.kb_json("sessions", "--all") or []:
 			if row.get("state") == "settled":
-				outcome = self.kb_json("merge", row["id"]) or {}
+				outcome = self.kb_json("merge", row["id"], extra_env={"KB_TRIGGER": "timer:eod"}) or {}
 				self.log(f"eod merge {row['id']}: class={outcome.get('class')} state={outcome.get('state')} landed={outcome.get('landed')}")
 		self.now = night.replace(hour=3)
 		self.section(f"generation {gen}: nightly")
-		nightly = self.kb_json("maintain", "nightly") or {}
+		nightly = self.kb_json("maintain", "nightly", extra_env={"KB_TRIGGER": "timer:nightly"}) or {}
 		findings = nightly.get("findings", [])
 		self.log(f"nightly: {len(findings)} findings, escalations={len(nightly.get('escalations', []))}, checkpoint={nightly.get('checkpoint')}")
 		for f in findings:
@@ -340,7 +340,7 @@ class Sim:
 			if approved.get("landed"):
 				self.show_commit(approved["landed"])
 		self.now = night.replace(hour=4)
-		self.kb_cmd("backup", "run", "--kind", "bundle-full")
+		self.kb_cmd("backup", "run", "--kind", "bundle-full", extra_env={"KB_TRIGGER": "timer:backup-full"})
 		self.kb_cmd("tick")
 
 	# -- metrics ------------------------------------------------------------------------------
