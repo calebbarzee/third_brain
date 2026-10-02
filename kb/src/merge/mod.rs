@@ -65,6 +65,9 @@ pub struct MergeOpts {
     pub approve: bool,
     /// actor recorded on the merge run log; defaults to the session's own actor.
     pub actor: Option<String>,
+    /// class the session review regardless of the gate, with this reason: it waits in
+    /// `kb review list` for a person (nightly delete and revert use this).
+    pub force_review: Option<String>,
 }
 
 /// a review item written under `refs/notes/kb-review` on a session's head commit.
@@ -215,7 +218,7 @@ pub fn merge_with_providers(cfg: &Config, session_id: &str, opts: MergeOpts, gat
         let gate = run_structure_gate(cfg, &session, &base, &head, actor_is_agent, &mut log)?;
         class = gate.class;
         reasons = gate.reasons.clone();
-        if let Some(r) = forced_review_reason {
+        if let Some(r) = forced_review_reason.or_else(|| opts.force_review.clone()) {
             class = MergeClass::Review;
             reasons.push(r);
         }
@@ -687,9 +690,16 @@ fn run_structure_gate(cfg: &Config, session: &Session, base: &str, head: &str, a
 
     let mut class = MergeClass::Auto;
     let mut reasons = Vec::new();
+    if actor_is_agent && !cfg.manifest.thresholds.agent_auto_merge {
+        class = MergeClass::Review;
+        reasons.push("agent session: a person approves every agent change (manifest `agent_auto_merge = false`)".to_string());
+    }
     for (status, old_path, new_path) in changed {
         let path = if new_path.is_empty() { old_path.clone() } else { new_path.clone() };
         if !path.starts_with("docs/") || !path.ends_with(".md") {
+            // configuration, prompts, schemas, and groups steer every later check and model call
+            class = MergeClass::Review;
+            reasons.push(format!("{path}: outside docs/*.md; a person approves it"));
             continue;
         }
         let base_doc = if status == 'A' {
@@ -984,7 +994,7 @@ pub fn review_approve(cfg: &Config, session_id: &str, approver: Option<String>) 
     let head = git::head(&session.worktree)?;
     git::notes_append(&cfg.root, REVIEW_NOTES_REF, &head, &format!("approved-by = \"{principal}\"\n"))?;
 
-    merge(cfg, session_id, MergeOpts { check_only: false, approve: true, actor: None })
+    merge(cfg, session_id, MergeOpts { approve: true, ..MergeOpts::default() })
 }
 
 /// `kb review reject <session> --reason <text>`: appends a note and sends the session back to

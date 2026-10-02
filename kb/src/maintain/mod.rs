@@ -3,16 +3,11 @@
 //! (design.md §21) is the maintenance step that runs after a checkpoint is backed up.
 //!
 //! **delete and revert are always review class.** design.md §15.3 marks the "superseded past
-//! delete days", "draft past ttl", and "bad merged change" rows "review class always", but
-//! `merge::run_structure_gate` (owned by the `merge` module, not this one) skips deletions
-//! entirely and has no special case for a nightly-authored revert -- left to the normal path,
-//! a low-criticality document with no other reason to review would land automatically, which is
-//! exactly what these three rows forbid. lacking a way to force `merge::merge`'s classification
-//! from outside, this module instead runs those three kinds with `MergeOpts { check_only: true,
-//! .. }` (so nothing ever lands from this call) and always records an escalation, regardless of
-//! what the check-only pass would have classified. every other auto-fixable kind uses
-//! `MergeOpts::default()` and lands normally when the gate and policy allow it. see the report
-//! for the follow-up this implies for `merge::run_structure_gate`.
+//! delete days", "draft past ttl", and "bad merged change" rows "review class always". this
+//! module merges those sessions with `MergeOpts::force_review`, so each lands in the review
+//! queue (`kb review list`) with a note and waits for a person, and always records an
+//! escalation. every other auto-fixable kind uses `MergeOpts::default()`; with the default
+//! manifest (`agent_auto_merge = false`) those wait for a person too, since nightly is an agent.
 
 pub mod compact;
 pub mod findings;
@@ -406,11 +401,15 @@ fn handle_delete_finding(cfg: &Config, actor_str: &str, f: &Finding, log: &mut R
     git::run(&sess.worktree, &["rm", "-q", rel.as_str()])?;
     git::commit_all(&sess.worktree, &format!("wip: nightly delete {target}"))?;
     session::settle(cfg, &mut sess, Some(&format!("nightly curation: delete {target}\n\n{}", f.detail)))?;
-    let outcome = merge::merge(cfg, &sess.id, MergeOpts { check_only: true, approve: false, actor: Some(actor_str.to_string()) })?;
+    let outcome = merge::merge(
+        cfg,
+        &sess.id,
+        MergeOpts { actor: Some(actor_str.to_string()), force_review: Some("nightly delete: a person approves every delete".into()), ..Default::default() },
+    )?;
     write_escalation(cfg, f)?;
     Ok((
         Some(sess.id.clone()),
-        format!("checked, never landed automatically (class {:?}; reasons: {})", outcome.class, outcome.reasons.join("; ")),
+        format!("waiting in the review queue, never landed automatically (class {:?}; reasons: {})", outcome.class, outcome.reasons.join("; ")),
     ))
 }
 
@@ -427,10 +426,14 @@ fn handle_revert_finding(cfg: &Config, actor_str: &str, f: &Finding) -> Result<(
         return Ok((None, format!("revert failed: {e:#}")));
     }
     session::settle(cfg, &mut sess, Some(&format!("nightly curation: revert {sha}\n\n{}", f.detail)))?;
-    let outcome = merge::merge(cfg, &sess.id, MergeOpts { check_only: true, approve: false, actor: Some(actor_str.to_string()) })?;
+    let outcome = merge::merge(
+        cfg,
+        &sess.id,
+        MergeOpts { actor: Some(actor_str.to_string()), force_review: Some("nightly revert: a person approves every revert".into()), ..Default::default() },
+    )?;
     Ok((
         Some(sess.id.clone()),
-        format!("checked, never landed automatically (class {:?}; reasons: {})", outcome.class, outcome.reasons.join("; ")),
+        format!("waiting in the review queue, never landed automatically (class {:?}; reasons: {})", outcome.class, outcome.reasons.join("; ")),
     ))
 }
 

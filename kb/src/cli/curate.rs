@@ -100,6 +100,10 @@ pub fn run(cfg: &Config, cmd: CurateCommand, json: bool) -> Result<i32> {
             let actor = crate::policy::Actor::parse(&s.actor).map_err(anyhow::Error::msg)?;
             let owner = crate::policy::responsible_party(cfg, &actor);
             for op in &ops {
+                let decision = curate::decide_op(cfg, &actor, &s.worktree, op)?;
+                if !decision.allow {
+                    anyhow::bail!("{} {}: policy denied: {}", op.op, op.target_id.as_deref().unwrap_or("(new)"), decision.reasons.join("; "));
+                }
                 curate::ops::apply(cfg, &s.worktree, op, &owner)?;
                 git::run(&s.worktree, &["add", "-A"])?;
                 git::commit_all(&s.worktree, &format!("wip: {} {}", op.op, op.target_id.as_deref().unwrap_or("(new)")))?;

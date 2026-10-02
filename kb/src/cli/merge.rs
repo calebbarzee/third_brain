@@ -93,7 +93,7 @@ fn report_outcome(outcome: &MergeOutcome, json: bool) -> Result<i32> {
 pub fn run(cfg: &Config, cmd: MergeCommand, json: bool) -> Result<i32> {
     match cmd {
         MergeCommand::Merge { session, check, approve } => {
-            let outcome = merge::merge(cfg, &session, MergeOpts { check_only: check, approve, actor: None })?;
+            let outcome = merge::merge(cfg, &session, MergeOpts { check_only: check, approve, ..MergeOpts::default() })?;
             report_outcome(&outcome, json)
         }
         MergeCommand::Review { cmd } => match cmd {

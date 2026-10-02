@@ -88,6 +88,11 @@ pub struct Applied {
 /// find `docs/<id>.md`, or its sharded form `docs/<id[..3]>/<id>.md` (the same two forms
 /// `session::sparse_patterns` checks out for an agent session).
 pub fn locate_doc(worktree: &Path, id: &str) -> Result<PathBuf> {
+    // an id is a ulid and nothing else: a path such as `../prompts/style` would reach files
+    // outside docs/.
+    if !crate::model::is_ulid(id) {
+        bail!("target_id `{id}` is not a document ulid");
+    }
     let flat = worktree.join("docs").join(format!("{id}.md"));
     if flat.is_file() {
         return Ok(flat);

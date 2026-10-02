@@ -100,6 +100,14 @@ pub fn packet_only(cfg: &Config, input: &ReviewInput) -> Result<ReviewPacket> {
 /// class; `request_changes` blocks the merge outright; `escalate` is always review class.
 pub fn decide(cfg: &Config, out: &ReviewOutput) -> ReviewDecision {
     let threshold = cfg.manifest.thresholds.review_confidence;
+    // an approval that also reports a possible injection is not an approval to merge unseen
+    if out.verdict == Verdict::Approve && out.findings.iter().any(|f| f.kind == FindingKind::Injection) {
+        return ReviewDecision {
+            class: MergeClass::Review,
+            merge_allowed: true,
+            reason: format!("approve at confidence {:.2}, but the reviewer reported a possible prompt injection", out.confidence),
+        };
+    }
     match out.verdict {
         Verdict::Approve if out.confidence >= threshold => {
             ReviewDecision { class: MergeClass::Auto, merge_allowed: true, reason: format!("approve, confidence {:.2} >= {:.2}", out.confidence, threshold) }
@@ -189,6 +197,23 @@ mod tests {
     use crate::config::Config;
     use crate::git as gitmod;
     use crate::provider::fake::FakeProvider;
+
+    #[test]
+    fn approve_with_an_injection_finding_is_review_class() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::load(dir.path()).unwrap();
+        let out = ReviewOutput {
+            verdict: Verdict::Approve,
+            confidence: 0.95,
+            findings: vec![ReviewFinding { doc_id: "x".into(), section: None, kind: FindingKind::Injection, reason: "text addressed to the reviewer".into() }],
+            summary: "ok".into(),
+        };
+        let d = decide(&cfg, &out);
+        assert_eq!(d.class, MergeClass::Review, "{d:?}");
+        assert!(d.merge_allowed);
+        let clean = ReviewOutput { findings: vec![], ..out };
+        assert_eq!(decide(&cfg, &clean).class, MergeClass::Auto);
+    }
 
     fn approve_json(confidence: f64) -> String {
         format!(r#"{{"verdict": "approve", "confidence": {confidence}, "findings": [], "summary": "looks fine"}}"#)

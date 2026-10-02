@@ -94,7 +94,9 @@ fn dry_run_then_real_runs_land_escalate_and_checkpoint_when_clean() {
 
     // 2. lower min_corpus so auto-fixes are actually proposed, and rebuild the index (same
     // commit, so `refresh_captures` -- `index::build` would just reuse the existing artifact).
-    let manifest_text = kb::cli::init::MANIFEST_TOML.replace("min_corpus = 50", "min_corpus = 1");
+    // `agent_auto_merge = true`: this test covers the opt-in path where nightly's in-band
+    // editorial fixes land on their own; `default_nightly_fixes_wait_for_a_person` covers the default.
+    let manifest_text = kb::cli::init::MANIFEST_TOML.replace("min_corpus = 50", "min_corpus = 1").replace("agent_auto_merge = false", "agent_auto_merge = true");
     std::fs::write(root.join("manifest.toml"), manifest_text).unwrap();
     let cfg = Config::load(root).unwrap();
     kb::index::refresh_captures(&cfg, None).unwrap();
@@ -161,4 +163,31 @@ fn dry_run_then_real_runs_land_escalate_and_checkpoint_when_clean() {
     let tag = report2.checkpoint.unwrap();
     assert!(tag.starts_with("checkpoint/"), "{tag}");
     assert!(git::tag_exists(root, &tag));
+}
+
+/// with the default manifest (`agent_auto_merge = false`), nightly is an agent like any other:
+/// its auto-retire waits in the review queue, and its delete never lands.
+#[test]
+fn default_nightly_fixes_wait_for_a_person() {
+    let (dir, draft_id) = seed_repo();
+    let root = dir.path();
+    let manifest_text = kb::cli::init::MANIFEST_TOML.replace("min_corpus = 50", "min_corpus = 1");
+    std::fs::write(root.join("manifest.toml"), manifest_text).unwrap();
+    let cfg = Config::load(root).unwrap();
+    assert!(!cfg.manifest.thresholds.agent_auto_merge);
+    kb::index::build(&cfg, None).unwrap();
+    let main_before = git::head(root).unwrap();
+
+    let report = maintain::nightly(&cfg, NightlyOpts::default()).unwrap();
+
+    assert_eq!(git::head(root).unwrap(), main_before, "nothing lands without a person: {report:?}");
+    assert!(doc_exists_on_main(root, &draft_id));
+    let stale_bytes = git::show_file(root, "main", &format!("docs/{STALE_ID}.md")).unwrap();
+    let stale_doc = kb::parse::parse_document(&String::from_utf8(stale_bytes).unwrap()).unwrap();
+    assert_ne!(stale_doc.frontmatter.status, Some(kb::model::Status::Archived));
+    let queued = kb::merge::review_list(&cfg).unwrap();
+    assert!(queued.len() >= 2, "the retire and the delete both wait in the review queue: {queued:?}");
+    for s in kb::session::list(&cfg).unwrap().into_iter().filter(|s| s.objective.starts_with("nightly curation")) {
+        assert_eq!(s.state, kb::session::SessionState::Review, "{}", s.objective);
+    }
 }

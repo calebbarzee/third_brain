@@ -252,6 +252,14 @@ fn load_doc_view(cfg: &Config, worktree: &Path, op: &ProposedOp) -> Result<Optio
     Ok(Some(DocPolicyView::from_frontmatter(cfg, &doc.frontmatter, word_count, band, in_canon, in_code)?))
 }
 
+/// the policy function's decision for one operation against the document as it stands in
+/// `worktree`; the same check `run` makes before applying a model's operation.
+pub fn decide_op(cfg: &Config, actor: &policy::Actor, worktree: &Path, op: &ProposedOp) -> Result<policy::Decision> {
+    let doc_view = load_doc_view(cfg, worktree, op)?;
+    let req = OpRequest { op: op.op, section: op.section.clone(), field: op.field.clone(), added_words: added_words(op), target_layer: op.layer };
+    Ok(policy::decide(cfg, actor, doc_view.as_ref(), &req))
+}
+
 fn added_words(op: &ProposedOp) -> usize {
     op.content.as_deref().map(|c| c.split_whitespace().count()).unwrap_or(0)
 }
@@ -353,9 +361,7 @@ pub fn run_with_provider(cfg: &Config, input: CurateInput, provider_override: Op
             continue;
         }
 
-        let doc_view = load_doc_view(cfg, &session.worktree, op)?;
-        let req = OpRequest { op: op.op, section: op.section.clone(), field: op.field.clone(), added_words: added_words(op), target_layer: op.layer };
-        let decision = policy::decide(cfg, &actor, doc_view.as_ref(), &req);
+        let decision = decide_op(cfg, &actor, &session.worktree, op)?;
         log.policy_decision(op.target_id.as_deref().unwrap_or("(new)"), op.op, decision.allow, decision.class, &decision.reasons)?;
         if !decision.allow {
             discards.push((op.target_id.clone().unwrap_or_default(), format!("policy denied: {}", decision.reasons.join("; "))));

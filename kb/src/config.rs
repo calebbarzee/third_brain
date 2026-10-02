@@ -139,6 +139,9 @@ pub struct Thresholds {
     pub diff_max_docs: u32,
     pub diff_max_fraction: f64,
     pub merge_retries: u32,
+    /// when false (the default), every agent session is review class: a person approves each
+    /// agent change. design.md §31's eval gates are the evidence for turning this on.
+    pub agent_auto_merge: bool,
 }
 impl Default for Thresholds {
     fn default() -> Self {
@@ -158,6 +161,7 @@ impl Default for Thresholds {
             diff_max_docs: 20,
             diff_max_fraction: 0.3,
             merge_retries: 5,
+            agent_auto_merge: false,
         }
     }
 }

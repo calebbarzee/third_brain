@@ -52,6 +52,8 @@ superseded_delete_days = 90
 orphan_days = 90
 classify_retries = 3
 review_retries = 2
+# false: a person approves every agent change; turn on only after design.md §31's eval gates pass
+agent_auto_merge = false
 
 [weights]
 in_canon = 0.25
