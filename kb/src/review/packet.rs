@@ -394,6 +394,9 @@ pub fn render(packet: &ReviewPacket) -> String {
         out.push_str(&format!("main = \"{main}\"\n"));
     }
     out.push_str(&format!("actor = \"{}\"\n", packet.actor));
+    // the reviewer's own idea of today may differ from kb's; dates in the change are judged
+    // against this one
+    out.push_str(&format!("today = \"{}\"\n", crate::clock::now().format("%Y-%m-%d")));
     out.push_str(&format!("justification = \"\"\"\n{}\n\"\"\"\n", packet.justification));
 
     if let Some(facts) = &packet.session_facts {

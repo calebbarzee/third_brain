@@ -294,27 +294,28 @@ fn read_title_id(repo: &Path, rev: &str, path: &str) -> (String, String) {
     }
 }
 
-/// count sections whose content differs between two full file texts (frontmatter and all), at
-/// least 1 whenever the texts differ. a parse failure on either side counts as one changed
-/// section rather than failing settle.
-fn count_changed_sections(old_text: &str, new_text: &str) -> usize {
-    if old_text == new_text {
-        return 0;
-    }
-    let old_body = crate::parse::parse_document(old_text).map(|d| d.body).unwrap_or_default();
-    let new_body = crate::parse::parse_document(new_text).map(|d| d.body).unwrap_or_default();
-    let old_sections = crate::parse::body::parse_body(&old_body).sections;
-    let new_sections = crate::parse::body::parse_body(&new_body).sections;
-
-    let extract = |text: &str, s: &crate::model::Section| text.get(s.start..s.end).unwrap_or("").to_string();
-    let old_map: std::collections::BTreeMap<String, String> =
-        old_sections.iter().map(|s| (s.path.clone(), extract(&old_body, s))).collect();
-    let new_map: std::collections::BTreeMap<String, String> =
-        new_sections.iter().map(|s| (s.path.clone(), extract(&new_body, s))).collect();
-
-    let mut paths: std::collections::BTreeSet<&String> = old_map.keys().collect();
-    paths.extend(new_map.keys());
-    paths.into_iter().filter(|p| old_map.get(*p) != new_map.get(*p)).count().max(1)
+/// a one-line summary of how a document's sections changed, e.g. "1 section added" or
+/// "2 sections changed, 1 section removed". sections compare by their own text, keyed so that
+/// `_body` and `_preamble` match, the same way the review packet's structure facts do; a
+/// frontmatter-only change says so. a parse failure on either side reads as one changed section.
+fn summarize_changed_sections(old_text: &str, new_text: &str) -> String {
+    use crate::parse::body::{diff_key, own_text, parse_body};
+    let (Ok(old_doc), Ok(new_doc)) = (crate::parse::parse_document(old_text), crate::parse::parse_document(new_text)) else {
+        return "1 section changed".to_string();
+    };
+    let old_sections = parse_body(&old_doc.body).sections;
+    let new_sections = parse_body(&new_doc.body).sections;
+    let old_map: std::collections::BTreeMap<&str, &str> =
+        old_sections.iter().enumerate().map(|(i, s)| (diff_key(&s.path), own_text(&old_doc.body, &old_sections, i))).collect();
+    let new_map: std::collections::BTreeMap<&str, &str> =
+        new_sections.iter().enumerate().map(|(i, s)| (diff_key(&s.path), own_text(&new_doc.body, &new_sections, i))).collect();
+    let added = new_map.keys().filter(|k| !old_map.contains_key(*k)).count();
+    let removed = old_map.keys().filter(|k| !new_map.contains_key(*k)).count();
+    let changed = new_map.iter().filter(|(k, v)| old_map.get(*k).is_some_and(|o| o != *v)).count();
+    let plural = |n: usize, what: &str| format!("{n} section{} {what}", if n == 1 { "" } else { "s" });
+    let parts: Vec<String> =
+        [(added, "added"), (changed, "changed"), (removed, "removed")].into_iter().filter(|(n, _)| *n > 0).map(|(n, w)| plural(n, w)).collect();
+    if parts.is_empty() { "frontmatter changed".to_string() } else { parts.join(", ") }
 }
 
 /// per-document lines for the settled commit message, from `git diff --name-status base..head`.
@@ -339,10 +340,7 @@ fn describe_changes(repo: &Path, base: &str, _head: &str) -> Result<Vec<DocChang
                 let old_text = git::show_file(repo, base, &old_path).ok().and_then(|b| String::from_utf8(b).ok());
                 let new_text = std::fs::read_to_string(repo.join(&new_path)).ok();
                 match (old_text, new_text) {
-                    (Some(o), Some(n)) => {
-                        let n_changed = count_changed_sections(&o, &n).max(1);
-                        format!("{n_changed} section{} changed", if n_changed == 1 { "" } else { "s" })
-                    }
+                    (Some(o), Some(n)) => summarize_changed_sections(&o, &n),
                     _ => "content changed".to_string(),
                 }
             }
@@ -691,10 +689,15 @@ mod tests {
     }
 
     #[test]
-    fn changed_sections_counts_differing_slugs_and_floors_at_one() {
+    fn section_summary_names_added_changed_and_removed() {
         let old = "+++\nid = \"x\"\n+++\n\n# a\n\none\n\n# b\n\ntwo\n";
         let new = "+++\nid = \"x\"\n+++\n\n# a\n\none changed\n\n# b\n\ntwo\n";
-        assert_eq!(count_changed_sections(old, new), 1);
-        assert_eq!(count_changed_sections(old, old), 0);
+        assert_eq!(summarize_changed_sections(old, new), "1 section changed");
+        // the simulation's case: a heading-less note gains its first heading at the end
+        let flat = "+++\nid = \"x\"\n+++\n\nlauncher ip 192.168.50.10\n";
+        let appended = "+++\nid = \"x\"\n+++\n\nlauncher ip 192.168.50.10\n\n## laptop\n\n192.168.50.20\n";
+        assert_eq!(summarize_changed_sections(flat, appended), "1 section added");
+        let retitled = "+++\nid = \"x\"\ntitle = \"t\"\n+++\n\n# a\n\none\n\n# b\n\ntwo\n";
+        assert_eq!(summarize_changed_sections(old, retitled), "frontmatter changed");
     }
 }
