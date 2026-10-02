@@ -164,8 +164,8 @@ fn section_diff(base: &Document, head: &Document) -> BodyChange {
         return BodyChange::None;
     }
 
-    let base_paths: Vec<&str> = base.sections.iter().map(|s| s.path.as_str()).collect();
-    let head_paths: Vec<&str> = head.sections.iter().map(|s| s.path.as_str()).collect();
+    let base_paths: Vec<&str> = base.sections.iter().map(|s| crate::parse::body::diff_key(&s.path)).collect();
+    let head_paths: Vec<&str> = head.sections.iter().map(|s| crate::parse::body::diff_key(&s.path)).collect();
 
     // new sections appended after every existing one, with the existing ones untouched. trailing
     // whitespace is trimmed before comparing: inserting a heading after a section adds a
@@ -236,6 +236,17 @@ mod tests {
     }
 
     const HEAD_FM: &str = "+++\nid = \"01K5A7Q2XW3ZRCM8T6YB4VJH0N\"\nlayer = \"reference\"\ntitle = \"t\"\nstatus = \"draft\"\nagent_policy = \"editable\"\nowner = \"caleb\"\n+++\n\n";
+
+    /// a note with no headings gains its first `##` section: the old text moves from `_body` to
+    /// `_preamble` unchanged, so this is an append, not a rewrite.
+    #[test]
+    fn first_heading_added_to_a_headingless_note_is_an_append() {
+        let b = doc(&format!("{HEAD_FM}launcher ip 192.168.50.10\n"));
+        let h = doc(&format!("{HEAD_FM}launcher ip 192.168.50.10\n\n## laptop side\n\n192.168.50.20/24\n"));
+        let ops = infer(Some(&b), Some(&h));
+        assert_eq!(ops.len(), 1, "{ops:?}");
+        assert_eq!(ops[0].op, Operation::Append, "{ops:?}");
+    }
 
     #[test]
     fn create_and_delete() {

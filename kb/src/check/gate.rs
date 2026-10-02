@@ -120,13 +120,13 @@ fn touched_sections(base: Option<&Document>, head: &Document) -> Vec<String> {
     let head_map: HashMap<String, &str> = head
         .sections
         .iter()
-        .map(|s| (s.path.clone(), head.body[s.start..s.end].trim_end()))
+        .map(|s| (crate::parse::body::diff_key(&s.path).to_string(), head.body[s.start..s.end].trim_end()))
         .collect();
     let base_map: HashMap<String, &str> = match base {
         Some(b) => b
             .sections
             .iter()
-            .map(|s| (s.path.clone(), b.body[s.start..s.end].trim_end()))
+            .map(|s| (crate::parse::body::diff_key(&s.path).to_string(), b.body[s.start..s.end].trim_end()))
             .collect(),
         None => HashMap::new(),
     };
@@ -151,8 +151,8 @@ fn is_append_only_change(base: Option<&Document>, head: &Document) -> bool {
     let body_ok = match base {
         None => true,
         Some(b) => {
-            let base_paths: Vec<&str> = b.sections.iter().map(|s| s.path.as_str()).collect();
-            let head_paths: Vec<&str> = head.sections.iter().map(|s| s.path.as_str()).collect();
+            let base_paths: Vec<&str> = b.sections.iter().map(|s| crate::parse::body::diff_key(&s.path)).collect();
+            let head_paths: Vec<&str> = head.sections.iter().map(|s| crate::parse::body::diff_key(&s.path)).collect();
             head_paths.len() >= base_paths.len()
                 && head_paths[..base_paths.len()] == base_paths[..]
                 && b.sections

@@ -226,8 +226,9 @@ fn compute_structure(base: Option<&Document>, head: Option<&Document>) -> DocStr
     let base_parse = crate::parse::parse_body(base_body);
     let head_parse = crate::parse::parse_body(head_body);
 
-    let base_map: HashMap<&str, &str> = base_parse.sections.iter().map(|s| (s.path.as_str(), base_body[s.start..s.end].trim_end())).collect();
-    let head_map: HashMap<&str, &str> = head_parse.sections.iter().map(|s| (s.path.as_str(), head_body[s.start..s.end].trim_end())).collect();
+    let key = crate::parse::body::diff_key;
+    let base_map: HashMap<&str, &str> = base_parse.sections.iter().map(|s| (key(&s.path), base_body[s.start..s.end].trim_end())).collect();
+    let head_map: HashMap<&str, &str> = head_parse.sections.iter().map(|s| (key(&s.path), head_body[s.start..s.end].trim_end())).collect();
 
     let mut sections_added = Vec::new();
     let mut sections_changed = Vec::new();
@@ -245,8 +246,8 @@ fn compute_structure(base: Option<&Document>, head: Option<&Document>) -> DocStr
 
     // best-effort rename guess: a removed and an added heading at the same position (index),
     // counting only the sections that exist on one side. not a certainty -- just a hint.
-    let removed_headings: Vec<&str> = base_parse.sections.iter().filter(|s| sections_removed.iter().any(|p| p == &s.path)).map(|s| s.heading.as_str()).collect();
-    let added_headings: Vec<&str> = head_parse.sections.iter().filter(|s| sections_added.iter().any(|p| p == &s.path)).map(|s| s.heading.as_str()).collect();
+    let removed_headings: Vec<&str> = base_parse.sections.iter().filter(|s| sections_removed.iter().any(|p| p == key(&s.path))).map(|s| s.heading.as_str()).collect();
+    let added_headings: Vec<&str> = head_parse.sections.iter().filter(|s| sections_added.iter().any(|p| p == key(&s.path))).map(|s| s.heading.as_str()).collect();
     let headings_renamed = removed_headings
         .iter()
         .zip(added_headings.iter())
@@ -478,6 +479,17 @@ mod tests {
     use crate::config::Config;
     use crate::git as gitmod;
     use crate::model::Layer;
+
+    #[test]
+    fn appending_the_first_heading_removes_no_section() {
+        let fm = "+++\nid = \"01K5A7Q2XW3ZRCM8T6YB4VJH0N\"\nlayer = \"reference\"\ntitle = \"t\"\nstatus = \"draft\"\nagent_policy = \"editable\"\nowner = \"caleb\"\n+++\n\n";
+        let base = crate::parse::parse_document(&format!("{fm}launcher ip 192.168.50.10\n")).unwrap();
+        let head = crate::parse::parse_document(&format!("{fm}launcher ip 192.168.50.10\n\n## laptop side\n\n192.168.50.20/24\n")).unwrap();
+        let s = compute_structure(Some(&base), Some(&head));
+        assert!(s.sections_removed.is_empty(), "{:?}", s.sections_removed);
+        assert!(s.sections_changed.is_empty(), "{:?}", s.sections_changed);
+        assert_eq!(s.sections_added, vec!["laptop-side".to_string()]);
+    }
 
     fn write_doc(id: &str, title: &str, body_extra: &str) -> String {
         format!(

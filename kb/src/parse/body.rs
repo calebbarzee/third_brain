@@ -62,6 +62,13 @@ fn fence_marker(line: &str) -> Option<(char, usize)> {
     None
 }
 
+/// the key a section is compared under when diffing two versions of one document. `_body` (a
+/// body with no headings) and `_preamble` (text before the first heading) are the same text: an
+/// append that adds the first heading turns one into the other without changing it.
+pub fn diff_key(path: &str) -> &str {
+    if path == "_body" { "_preamble" } else { path }
+}
+
 pub fn parse_body(body: &str) -> BodyParse {
     struct Head {
         level: u8,
