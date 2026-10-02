@@ -129,9 +129,12 @@ pub fn run(cfg: &Config, cmd: SessionCommand, json: bool) -> Result<i32> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                println!("settled {}, abandoned {}, skipped {}", report.settled, report.abandoned, report.skipped);
+                println!("settled {}, abandoned {}, skipped {}, failed {}", report.settled, report.abandoned, report.skipped, report.failed.len());
+                for f in &report.failed {
+                    eprintln!("eod failed: {f}");
+                }
             }
-            Ok(0)
+            Ok(if report.failed.is_empty() { 0 } else { 1 })
         }
     }
 }

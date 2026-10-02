@@ -187,7 +187,7 @@ fn principle_layer_change_goes_to_review_then_approve_lands_it() {
     let outcome = merge::merge(&cfg, &s.id, MergeOpts::default()).unwrap();
     assert_eq!(outcome.class, MergeClass::Review, "{outcome:?}");
     assert!(outcome.landed.is_none());
-    assert_eq!(outcome.state, SessionState::Settled);
+    assert_eq!(outcome.state, SessionState::Review);
 
     let items = merge::review_list(&cfg).unwrap();
     assert_eq!(items.len(), 1);

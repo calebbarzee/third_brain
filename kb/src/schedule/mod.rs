@@ -110,10 +110,13 @@ fn eod_merge_script(bin: &Path, root: &Path) -> String {
         "set -e".to_string(),
         format!("KB=\"{}\"", bin.display()),
         format!("ROOT=\"{}\"", root.display()),
-        "\"$KB\" --repo \"$ROOT\" eod".to_string(),
+        "# a session eod could not settle must not stop the others from merging".to_string(),
+        "status=0".to_string(),
+        "\"$KB\" --repo \"$ROOT\" eod || status=$?".to_string(),
         "\"$KB\" --repo \"$ROOT\" sessions --all | awk '$2 == \"settled\" { print $1 }' | while read -r id; do".to_string(),
         "  \"$KB\" --repo \"$ROOT\" merge \"$id\" || true".to_string(),
         "done".to_string(),
+        "exit \"$status\"".to_string(),
     ];
     lines.join("\n") + "\n"
 }

@@ -99,6 +99,7 @@ pub fn merge(cfg: &Config, session_id: &str, opts: MergeOpts) -> Result<MergeOut
 /// every other role).
 pub fn merge_with_providers(cfg: &Config, session_id: &str, opts: MergeOpts, gate_override: Option<&dyn Provider>) -> Result<MergeOutcome> {
     let mut session = session::load(cfg, session_id)?;
+    check_mergeable(&session)?;
 
     let mut log = RunLog::create(
         cfg,
@@ -180,6 +181,14 @@ pub fn merge_with_providers(cfg: &Config, session_id: &str, opts: MergeOpts, gat
 
         // merge-base(main, head) after a clean rebase is main itself.
         let base = git::rev_parse(&cfg.root, &main_ref)?;
+        // the session now sits on `base`. record that, so a later settle squashes only this
+        // session's own commits and the review diff shows only its own changes; with the old
+        // base, both would also include everything that landed on main since the session opened.
+        if session.base_commit != base {
+            session.base_commit = base.clone();
+            git::update_ref(&cfg.root, &format!("refs/kb/sessions/{}/base", session.id), &base)?;
+            session::save(cfg, &session)?;
+        }
 
         // step 3: policy.
         match run_policy_checks(cfg, &session, &mut log, &base, &head, actor_is_agent, &mut checks)? {
@@ -301,12 +310,12 @@ pub fn merge_with_providers(cfg: &Config, session_id: &str, opts: MergeOpts, gat
             }
         } else {
             write_review_note(cfg, &session, class, &reasons, &checks, &run_id)?;
-            session.state = SessionState::Settled;
+            session.state = SessionState::Review;
             session::save(cfg, &session)?;
             log.merge_end(serde_json::json!({"class": "review", "reasons": reasons}))?;
             log.run_end(RunStatus::Escalated, Some(&head), None, None, &[], &[])?;
             log.seal(cfg).ok();
-            return Ok(MergeOutcome { landed: None, class, state: SessionState::Settled, checks, reasons, run_id });
+            return Ok(MergeOutcome { landed: None, class, state: SessionState::Review, checks, reasons, run_id });
         }
     }
 
@@ -314,11 +323,42 @@ pub fn merge_with_providers(cfg: &Config, session_id: &str, opts: MergeOpts, gat
     class = MergeClass::Review;
     reasons.push(format!("exhausted {max_retries} merge retries; escalated to review"));
     write_review_note(cfg, &session, class, &reasons, &checks, &run_id)?;
-    session.state = SessionState::Settled;
+    session.state = SessionState::Review;
     session::save(cfg, &session)?;
     log.run_end(RunStatus::Escalated, None, None, None, &[], &[])?;
     log.seal(cfg).ok();
-    Ok(MergeOutcome { landed: None, class, state: SessionState::Settled, checks, reasons, run_id })
+    Ok(MergeOutcome { landed: None, class, state: SessionState::Review, checks, reasons, run_id })
+}
+
+/// refuse a merge that would lose work or land unsettled commits: the session must be settled
+/// (or waiting on review, an author fix, a human conflict resolution, or a stuck merge), and its
+/// worktree must hold no uncommitted files, since landing removes the worktree.
+fn check_mergeable(session: &Session) -> Result<()> {
+    match session.state {
+        SessionState::Settled | SessionState::Review | SessionState::NeedsAuthor | SessionState::NeedsHuman | SessionState::Merging => {}
+        SessionState::Open | SessionState::Hold => {
+            bail!("session {} is {}; run `kb session settle {}` first", session.id, session.state, session.id)
+        }
+        SessionState::Merged | SessionState::Abandoned => bail!("session {} is {}; nothing to merge", session.id, session.state),
+    }
+    if !session.worktree.is_dir() {
+        bail!("session {} has no worktree at {}; recreate it with `kb session open --resume {}`", session.id, session.worktree.display(), session.id);
+    }
+    // a human resolving a conflict has a rebase in progress; its staged and unmerged files are
+    // the resolution itself, not stray work.
+    if git::rebase_in_progress(&session.worktree) {
+        return Ok(());
+    }
+    let dirty = git::worktree_dirty_paths(&session.worktree)?;
+    if !dirty.is_empty() {
+        bail!(
+            "session {} has uncommitted work that landing would delete: {}; commit it and run `kb session settle {}` first",
+            session.id,
+            dirty.join(", "),
+            session.id
+        );
+    }
+    Ok(())
 }
 
 /// step 1: fetch `main` from `origin` when a remote is configured; the ref to rebase onto and to

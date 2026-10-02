@@ -138,8 +138,13 @@ pub fn run(cfg: &Config, cmd: MergeCommand, json: bool) -> Result<i32> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "tick: indexed={} stale-merging-settled={} worktrees-adopted={} worktrees-removed={} merged-sessions-cleaned={}",
-                    report.indexed, report.settled_stale_merging, report.adopted_worktrees, report.removed_worktrees, report.cleaned_merged_sessions
+                    "tick: indexed={} stale-merging-settled={} worktrees-adopted={} worktrees-removed={} worktrees-kept-dirty={} merged-sessions-cleaned={}",
+                    report.indexed,
+                    report.settled_stale_merging,
+                    report.adopted_worktrees,
+                    report.removed_worktrees,
+                    report.kept_dirty_worktrees,
+                    report.cleaned_merged_sessions
                 );
             }
             Ok(0)

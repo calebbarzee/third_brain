@@ -17,6 +17,8 @@ pub struct TickReport {
     pub settled_stale_merging: u32,
     pub adopted_worktrees: u32,
     pub removed_worktrees: u32,
+    /// orphan kb worktrees left in place because they hold uncommitted work.
+    pub kept_dirty_worktrees: u32,
     pub cleaned_merged_sessions: u32,
 }
 
@@ -72,28 +74,33 @@ pub fn tick(cfg: &Config) -> Result<TickReport> {
 
     let sessions = session::list(cfg)?;
     let session_ids: HashSet<String> = sessions.iter().map(|s| s.id.clone()).collect();
-    if let Ok(listing) = git::worktree_list_porcelain(&cfg.root) {
+    // only worktrees kb itself created, directly under `<state>/worktrees/`, are candidates; any
+    // other worktree of this repository (an editor's, an agent harness's) is not kb's to touch.
+    let kb_worktrees = std::fs::canonicalize(cfg.state_dir().join("worktrees")).ok();
+    if let (Ok(listing), Some(kb_worktrees)) = (git::worktree_list_porcelain(&cfg.root), kb_worktrees) {
         for block in listing.split("\n\n") {
             let Some(path) = block.lines().find_map(|l| l.strip_prefix("worktree ")) else {
                 continue;
             };
-            if !path.contains("worktrees") {
-                continue;
-            }
-            let Some(id) = std::path::Path::new(path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(str::to_string)
-            else {
+            let path = std::path::Path::new(path);
+            let Ok(canonical) = std::fs::canonicalize(path) else {
                 continue;
             };
-            if session_ids.contains(&id) {
+            if canonical.parent() != Some(kb_worktrees.as_path()) {
+                continue;
+            }
+            let Some(id) = canonical.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+                continue;
+            };
+            if !crate::model::is_ulid(&id) || session_ids.contains(&id) {
                 continue;
             }
             let branch = format!("session/{id}");
             if git::rev_parse(&cfg.root, &branch).is_err() {
-                let _ = git::worktree_remove(&cfg.root, std::path::Path::new(path));
-                report.removed_worktrees += 1;
+                match git::worktree_remove(&cfg.root, path) {
+                    Ok(()) => report.removed_worktrees += 1,
+                    Err(_) => report.kept_dirty_worktrees += 1,
+                }
             } else {
                 // a worktree with no session file but a live branch: nothing to reconstruct the
                 // session record from (actor, objective) beyond the branch name, so this counts

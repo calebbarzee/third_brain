@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 /// a session's place in its lifecycle. design.md §12 names open, settled, merging, needs-human,
 /// merged, abandoned; hold and needs-author are local additions used by `kb eod` and the secrets
-/// gate respectively.
+/// gate respectively. review means `kb merge` classed it review and it waits for
+/// `kb review approve`; the eod merge loop skips it so it is not re-reviewed every night.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionState {
@@ -21,6 +22,7 @@ pub enum SessionState {
     Merging,
     NeedsHuman,
     NeedsAuthor,
+    Review,
     Hold,
     Merged,
     Abandoned,
@@ -34,6 +36,7 @@ impl SessionState {
             SessionState::Merging => "merging",
             SessionState::NeedsHuman => "needs-human",
             SessionState::NeedsAuthor => "needs-author",
+            SessionState::Review => "review",
             SessionState::Hold => "hold",
             SessionState::Merged => "merged",
             SessionState::Abandoned => "abandoned",
@@ -83,6 +86,8 @@ pub struct EodReport {
     pub settled: u32,
     pub abandoned: u32,
     pub skipped: u32,
+    /// `<session id>: <error>` for each session the sweep could not settle; the sweep goes on.
+    pub failed: Vec<String>,
 }
 
 /// one row of `kb sessions`.
@@ -515,25 +520,44 @@ pub fn eod(cfg: &Config) -> Result<EodReport> {
             continue;
         }
 
-        let repo = session.worktree.clone();
-        if !git::status_porcelain(&repo, ".")?.is_empty() {
-            git::commit_all(&repo, "wip: end of day")?;
+        match eod_one(cfg, &mut session) {
+            Ok(EodOutcome::Settled) => report.settled += 1,
+            Ok(EodOutcome::Abandoned) => report.abandoned += 1,
+            Ok(EodOutcome::Skipped) => report.skipped += 1,
+            Err(e) => report.failed.push(format!("{}: {e:#}", session.id)),
         }
-
-        let ops = git::rev_list_count(&repo, &format!("{}..HEAD", session.base_commit))?;
-        let clean_now = git::status_porcelain(&repo, ".")?.is_empty();
-        if ops == 0 && clean_now && hours_since(&session.touched_at) > 24.0 {
-            abandon(cfg, &session.id)?;
-            report.abandoned += 1;
-            continue;
-        }
-
-        settle(cfg, &mut session, Some("end of day settle"))?;
-        session.eod = Some(true);
-        save(cfg, &session)?;
-        report.settled += 1;
     }
     Ok(report)
+}
+
+enum EodOutcome {
+    Settled,
+    Abandoned,
+    Skipped,
+}
+
+/// one session of the `kb eod` sweep. a session with no work is skipped, or abandoned once idle
+/// for 24 hours; settling it would fail with nothing to commit.
+fn eod_one(cfg: &Config, session: &mut Session) -> Result<EodOutcome> {
+    let repo = session.worktree.clone();
+    if !git::status_porcelain(&repo, ".")?.is_empty() {
+        git::commit_all(&repo, "wip: end of day")?;
+    }
+
+    let ops = git::rev_list_count(&repo, &format!("{}..HEAD", session.base_commit))?;
+    let clean_now = git::status_porcelain(&repo, ".")?.is_empty();
+    if ops == 0 && clean_now {
+        if hours_since(&session.touched_at) > 24.0 {
+            abandon(cfg, &session.id)?;
+            return Ok(EodOutcome::Abandoned);
+        }
+        return Ok(EodOutcome::Skipped);
+    }
+
+    settle(cfg, session, Some("end of day settle"))?;
+    session.eod = Some(true);
+    save(cfg, session)?;
+    Ok(EodOutcome::Settled)
 }
 
 /// `kb sessions`: id, actor, state, objective, files touched, commits since base, for every

@@ -230,9 +230,21 @@ pub fn worktree_add_existing_branch(repo: &Path, path: &Path, branch: &str) -> R
     Ok(())
 }
 
+/// remove a worktree. refuses, naming the files, when it holds modified or untracked files:
+/// those exist on no branch, so removing them would lose work.
 pub fn worktree_remove(repo: &Path, path: &Path) -> Result<()> {
-    run(repo, &["worktree", "remove", "--force", &path.display().to_string()])?;
+    let dirty = worktree_dirty_paths(path)?;
+    if !dirty.is_empty() {
+        bail!("worktree {} has uncommitted work, not removing it: {}", path.display(), dirty.join(", "));
+    }
+    run(repo, &["worktree", "remove", &path.display().to_string()])?;
     Ok(())
+}
+
+/// modified, staged, and untracked (not ignored) paths in the worktree at `path`.
+pub fn worktree_dirty_paths(path: &Path) -> Result<Vec<String>> {
+    let out = run(path, &["status", "--porcelain", "--untracked-files=all"])?;
+    Ok(out.lines().map(|l| l.get(3..).unwrap_or(l).to_string()).collect())
 }
 
 pub fn worktree_prune(repo: &Path) -> Result<()> {
