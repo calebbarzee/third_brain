@@ -22,7 +22,7 @@ pub enum BackupCommand {
     RestoreDrill { into: PathBuf },
 }
 
-fn parse_kind(s: &Option<String>) -> Result<BackupKind> {
+pub(crate) fn parse_kind(s: &Option<String>) -> Result<BackupKind> {
     Ok(match s.as_deref() {
         None | Some("all") => BackupKind::All,
         Some("mirror") => BackupKind::Mirror,

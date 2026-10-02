@@ -175,7 +175,7 @@ pub fn render(cfg: &Config, bin: &Path, opts: &ScheduleOptions) -> Result<Render
     let backup_calendar = on_calendar_daily(&opts.backup_full_at).with_context(|| format!("`--backup-full-at {}` is not `HH:MM`", opts.backup_full_at))?;
     units.push(Unit {
         name: "kb-backup-full.service".to_string(),
-        content: oneshot_service("kb daily full backup", root, &format!("{} --repo {} backup run --kind full", bin.display(), root.display())),
+        content: oneshot_service("kb daily full backup", root, &format!("{} --repo {} backup run --kind bundle-full", bin.display(), root.display())),
     });
     units.push(Unit {
         name: "kb-backup-full.timer".to_string(),
@@ -338,7 +338,7 @@ pub fn cron_lines(cfg: &Config, bin: &Path, opts: &ScheduleOptions) -> Result<Ve
 
     lines.push(format!("0 * * * * {bin} --repo {root_display} backup run --kind bundle"));
     let (full_h, full_m) = split_hhmm(&opts.backup_full_at).with_context(|| format!("`--backup-full-at {}` is not `HH:MM`", opts.backup_full_at))?;
-    lines.push(format!("{full_m} {full_h} * * * {bin} --repo {root_display} backup run --kind full"));
+    lines.push(format!("{full_m} {full_h} * * * {bin} --repo {root_display} backup run --kind bundle-full"));
 
     Ok(lines)
 }
@@ -417,6 +417,24 @@ mod tests {
     }
 
     #[test]
+    fn every_rendered_backup_kind_parses_in_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let bin = Path::new("/usr/local/bin/kb");
+        let opts = ScheduleOptions::default();
+        let mut texts: Vec<String> = render(&c, bin, &opts).unwrap().units.into_iter().map(|u| u.content).collect();
+        texts.extend(cron_lines(&c, bin, &opts).unwrap());
+        let mut seen = 0;
+        for text in &texts {
+            for kind in text.split("--kind ").skip(1).map(|rest| rest.split_whitespace().next().unwrap_or("").trim_end_matches('"')) {
+                crate::cli::backup::parse_kind(&Some(kind.to_string())).unwrap_or_else(|e| panic!("rendered `--kind {kind}` is rejected by the cli: {e}"));
+                seen += 1;
+            }
+        }
+        assert!(seen >= 4, "expected the hourly and daily backup kinds in both units and cron lines, saw {seen}");
+    }
+
+    #[test]
     fn render_rejects_a_malformed_time() {
         let dir = tempfile::tempdir().unwrap();
         let c = cfg(dir.path());
@@ -435,7 +453,7 @@ mod tests {
         assert!(joined.contains("kb-eod-merge.sh"));
         assert!(joined.contains("maintain nightly"));
         assert!(joined.contains("backup run --kind bundle"));
-        assert!(joined.contains("backup run --kind full"));
+        assert!(joined.contains("backup run --kind bundle-full"));
     }
 
     #[test]
