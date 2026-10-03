@@ -94,4 +94,6 @@ output only this json object, nothing before or after it:
 ```
 
 every op's `justification` is two to five sentences and is used verbatim in the settled
-commit's message; every `confidence` is a number from 0 to 1.
+commit's message; every `confidence` is a number from 0 to 1. describe what changed in
+meaning, not whitespace: kb normalizes blank lines when it writes the file, so a claimed
+blank-line change will not appear in the diff.
