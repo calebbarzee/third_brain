@@ -86,7 +86,7 @@ FACT_PATTERNS = [
 	r"`[^`\n]{2,60}`",  # inline code
 	r"\bv\d+\.\d+\.\d+\b",  # versions
 	r"\bGP\d{1,2}\b",  # pico pins
-	r"\b(?:nmcli|ip addr|systemctl|docker|git)\b[^\n]{0,40}",  # commands
+	r"(?m)^\s*(?:sudo|nmcli|ping|ssh|git|docker|systemctl|ip) [^\n]+$",  # whole command lines, fenced or not
 ]
 
 GENERIC_PHRASES = ["in summary", "in conclusion", "it is important to note", "overall,", "this document provides", "comprehensive", "robust", "seamless", "leverage"]
@@ -352,11 +352,28 @@ def normalize(text: str) -> str:
 	return re.sub(r"[\s`]+", "", text).lower()
 
 
+def code_lines(text: str) -> list[str]:
+	"""non-empty lines inside fenced code blocks: commands and config a rewrite must keep."""
+	out, inside = [], False
+	for line in text.splitlines():
+		if line.strip().startswith("```"):
+			inside = not inside
+		elif inside and line.strip():
+			out.append(line)
+	return out
+
+
 def facts_in(text: str) -> set[str]:
 	out: set[str] = set()
 	for pattern in FACT_PATTERNS:
 		out.update(normalize(m.group(0)) for m in re.finditer(pattern, text))
+	out.update(normalize(line) for line in code_lines(text))
 	return {f for f in out if f}
+
+
+def is_structural(line: str) -> bool:
+	"""a line that repeats by construction: a code fence, a table separator, a rule, or a stub."""
+	return line.startswith("```") or bool(re.fullmatch(r"[|:\- ]+", line)) or len(line) < 4
 
 
 def facts_kept(facts: set[str], body: str) -> set[str]:
@@ -381,7 +398,7 @@ def measure(sim: Sim, gen: int, texts: dict[str, str], rows: list[dict]) -> None
 		prev_body = sim.body(sim.previous.get(doc_id, sim.baseline[doc_id]))
 		facts = facts_in(body)
 		kept = facts_kept(sim.baseline_facts[doc_id], body)
-		lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+		lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not is_structural(ln.strip())]
 		repeated = len(lines) - len(set(lines))
 		lower = body.lower()
 		rows.append(
