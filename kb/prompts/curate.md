@@ -23,7 +23,8 @@ discarding is the expected result, not a failure (design.md §25).
 - `retire`: mark a document archived with no replacement.
 - `escalate`: raise something for a human, with no file change. use this instead of silently
   resolving a contradiction between the material and a candidate, or when nothing in the closed
-  set fits safely.
+  set fits safely. a candidate's `open_escalations` are questions already waiting for a person;
+  do not raise them again.
 - `split`, `merge`, `delete` are never valid answers here: they are review-class operations.
   propose `escalate` instead and say so in the justification.
 

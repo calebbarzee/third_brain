@@ -34,6 +34,8 @@ pub struct Candidate {
     pub matched_sections: Vec<(String, String)>,
     pub allowed_ops: Vec<AllowedOp>,
     pub budget_headroom_words: i64,
+    /// questions about this document already waiting for a person; raising them again adds nothing.
+    pub open_escalations: Vec<String>,
 }
 
 /// one piece of source material prompting this run: a capture's text or the free-text proposal.
@@ -47,6 +49,8 @@ pub struct Excerpt {
 /// the assembled packet, bounded to `manifest.toml [packet] max_tokens` (design.md §16).
 #[derive(Debug, Clone, Serialize)]
 pub struct Packet {
+    /// kb's date, so the model judges dates in the material against it rather than its own.
+    pub today: String,
     pub task: String,
     pub objective: String,
     pub candidates: Vec<Candidate>,
@@ -215,6 +219,7 @@ pub fn build(cfg: &Config, actor: &Actor, task: &str, texts: &[(String, String)]
                 matched_sections: matched_sections.clone(),
                 allowed_ops,
                 budget_headroom_words: budget - rec.word_count,
+                open_escalations: crate::maintain::open_escalations_for(cfg, &rec.id),
             });
         }
         for (nid, title) in neighbor_ids.iter_mut() {
@@ -247,7 +252,7 @@ pub fn build(cfg: &Config, actor: &Actor, task: &str, texts: &[(String, String)]
         .map(|r| format!("{} {} {} {}", r.id, r.state, r.actor, r.objective))
         .collect();
 
-    let mut packet = Packet { task: task.to_string(), objective: task.to_string(), candidates, excerpts, neighbors, sessions_hint, style: load_style(cfg)? };
+    let mut packet = Packet { today: crate::clock::now().format("%Y-%m-%d").to_string(), task: task.to_string(), objective: task.to_string(), candidates, excerpts, neighbors, sessions_hint, style: load_style(cfg)? };
 
     let max_chars = (cfg.manifest.packet.max_tokens as usize).saturating_mul(4).max(1);
     while render(&packet).chars().count() > max_chars && !packet.excerpts.is_empty() {
@@ -259,6 +264,7 @@ pub fn build(cfg: &Config, actor: &Actor, task: &str, texts: &[(String, String)]
 /// render the packet as readable, toml-ish text for the model's user message.
 pub fn render(packet: &Packet) -> String {
     let mut out = String::new();
+    out.push_str(&format!("today = {:?}\n", packet.today));
     out.push_str(&format!("task = {:?}\n", packet.task));
     out.push_str(&format!("objective = {:?}\n\n", packet.objective));
 
@@ -272,6 +278,7 @@ pub fn render(packet: &Packet) -> String {
         out.push_str(&format!("criticality_pct = {}\n", c.criticality_pct.map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string())));
         out.push_str(&format!("budget_headroom_words = {}\n", c.budget_headroom_words));
         out.push_str(&format!("headings = {:?}\n", c.headings));
+        out.push_str(&format!("open_escalations = {:?}\n", c.open_escalations));
         out.push_str("matched_sections = [\n");
         for (path, snippet) in &c.matched_sections {
             out.push_str(&format!("  {{ section = {path:?}, snippet = {snippet:?} }},\n"));

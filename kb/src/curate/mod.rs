@@ -357,6 +357,9 @@ pub fn run_with_provider(cfg: &Config, input: CurateInput, provider_override: Op
     for op in &output.ops {
         if op.op == Operation::Escalate {
             log.decision(&format!("escalate: {}", op.justification))?;
+            // into the queue a person reads; a question already open there is not filed twice
+            let doc_ids: Vec<String> = op.target_id.iter().cloned().collect();
+            crate::maintain::escalate(cfg, "agent", &doc_ids, &op.justification)?;
             escalations.push(op.justification.clone());
             continue;
         }
@@ -397,7 +400,13 @@ pub fn run_with_provider(cfg: &Config, input: CurateInput, provider_override: Op
         let listed = escalations.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n");
         message.push_str(&format!("\n\nescalated to a person, no file change:\n{listed}"));
     }
-    let settled_commits = if applied_list.is_empty() { vec![] } else { session::settle(cfg, &mut session, Some(&message))? };
+    let settled_commits = if applied_list.is_empty() {
+        // nothing landed in the worktree; leave no empty session behind for eod to sweep
+        session::cleanup(cfg, &mut session, true)?;
+        vec![]
+    } else {
+        session::settle(cfg, &mut session, Some(&message))?
+    };
 
     log.settle(&settled_commits)?;
     log.report(&output.summary)?;
@@ -430,11 +439,13 @@ mod tests {
             matched_sections: vec![("install/linux".to_string(), "use the package manager".to_string())],
             allowed_ops: vec![policy::AllowedOp { op: Operation::Append, class: MergeClass::Auto, reasons: vec![] }],
             budget_headroom_words: 100,
+            open_escalations: vec![],
         }
     }
 
     fn packet_with(candidates: Vec<Candidate>) -> Packet {
         Packet {
+            today: "2026-10-02".to_string(),
             task: "curate one capture".to_string(),
             objective: "curate one capture".to_string(),
             candidates,

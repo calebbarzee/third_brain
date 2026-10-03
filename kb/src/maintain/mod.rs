@@ -68,13 +68,40 @@ fn escalations_dir(cfg: &Config) -> PathBuf {
     cfg.state_dir().join("escalations")
 }
 
-fn write_escalation(cfg: &Config, f: &Finding) -> Result<String> {
+fn write_escalation(cfg: &Config, f: &Finding) -> Result<Option<String>> {
+    escalate(cfg, f.kind.as_str(), &f.doc_ids, &f.detail)
+}
+
+/// put an item in the escalation queue (`kb maintain escalations`) for a person. one unresolved
+/// item per kind and set of documents: a repeat returns `None` and files nothing, so a nightly
+/// pass or an agent raising the same question every day leaves one item, not one per day.
+pub fn escalate(cfg: &Config, kind: &str, doc_ids: &[String], detail: &str) -> Result<Option<String>> {
+    let mut wanted: Vec<&str> = doc_ids.iter().map(String::as_str).collect();
+    wanted.sort_unstable();
+    let already_open = list_escalations(cfg)?.into_iter().any(|(_, rec)| {
+        let mut have: Vec<&str> = rec.doc_ids.iter().map(String::as_str).collect();
+        have.sort_unstable();
+        !rec.resolved && rec.kind == kind && have == wanted
+    });
+    if already_open {
+        return Ok(None);
+    }
     let dir = escalations_dir(cfg);
     std::fs::create_dir_all(&dir)?;
     let id = model::new_ulid();
-    let rec = EscalationRecord { kind: f.kind.to_string(), doc_ids: f.doc_ids.clone(), detail: f.detail.clone(), ts: crate::clock::now().to_rfc3339(), resolved: false };
+    let rec = EscalationRecord { kind: kind.to_string(), doc_ids: doc_ids.to_vec(), detail: detail.to_string(), ts: crate::clock::now().to_rfc3339(), resolved: false };
     std::fs::write(dir.join(format!("{id}.toml")), toml::to_string_pretty(&rec).context("serializing escalation")?)?;
-    Ok(id)
+    Ok(Some(id))
+}
+
+/// the details of unresolved escalations that name `doc_id`.
+pub fn open_escalations_for(cfg: &Config, doc_id: &str) -> Vec<String> {
+    list_escalations(cfg)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, rec)| !rec.resolved && rec.doc_ids.iter().any(|d| d == doc_id))
+        .map(|(_, rec)| rec.detail)
+        .collect()
 }
 
 /// every escalation on file, oldest first, as `(id, record)`.

@@ -163,3 +163,48 @@ fn scripted_provider_lands_an_append_in_a_settled_session() {
     let main_after = git::rev_parse(root, "main").unwrap();
     assert_eq!(main_before, main_after, "main must be unchanged by a settled (unmerged) session");
 }
+
+/// the simulation's pattern: an agent escalated the same open question every day, nowhere a
+/// person would look, and left an empty session behind each time. an escalate-only run must file
+/// one queue item, leave no session, and see that item in its next packet instead of filing again.
+#[test]
+fn an_escalation_reaches_the_queue_once_and_leaves_no_session() {
+    let dir = seed_repo();
+    let root = dir.path();
+    let cfg = Config::load(root).unwrap();
+    let escalate = || {
+        serde_json::json!({
+            "ops": [{
+                "op": "escalate",
+                "target_id": ID_TARGET,
+                "justification": "the launcher address in the material contradicts the document; a person must choose.",
+                "confidence": 0.9
+            }],
+            "discards": [],
+            "summary": "escalated a contradiction",
+        })
+        .to_string()
+    };
+    let input = || CurateInput {
+        actor: "agent:curate@svc-curate".to_string(),
+        task: "curate a free-text proposal".to_string(),
+        capture_ids: vec![],
+        proposal_text: Some("use nmcli to configure a static ip on the launcher at a different address".to_string()),
+        dry_run: false,
+    };
+
+    let report = curate::run_with_provider(&cfg, input(), Some(Box::new(ScriptedProvider::new(vec![escalate()])))).unwrap();
+    assert_eq!(report.escalations.len(), 1);
+    curate::run_with_provider(&cfg, input(), Some(Box::new(ScriptedProvider::new(vec![escalate()])))).unwrap();
+
+    let queued = kb::maintain::list_escalations(&cfg).unwrap();
+    assert_eq!(queued.len(), 1, "one open question, filed once: {queued:?}");
+    assert_eq!(queued[0].1.doc_ids, vec![ID_TARGET.to_string()]);
+    let open: Vec<_> = kb::session::list(&cfg).unwrap().into_iter().filter(|s| s.state == kb::session::SessionState::Open).collect();
+    assert!(open.is_empty(), "an escalate-only run left an open session: {open:?}");
+    let texts = vec![("proposal".to_string(), "static ip on the launcher with nmcli".to_string())];
+    let actor = kb::policy::Actor::parse("agent:curate@svc-curate").unwrap();
+    let packet = curate::build_packet(&cfg, &actor, "next run", &texts).unwrap();
+    let target = packet.candidates.iter().find(|c| c.id == ID_TARGET).expect("target is a candidate");
+    assert_eq!(target.open_escalations.len(), 1, "the next packet shows the open question");
+}
