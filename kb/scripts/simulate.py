@@ -722,6 +722,138 @@ def main() -> int:
 	return 0
 
 
+def toml_field(text: str, name: str) -> str:
+	"""the quoted value of a top-level `name = "..."` line, or an empty string."""
+	match = re.search(rf'^{name} = "([^"]*)"', text, re.MULTILINE)
+	return match.group(1) if match else ""
+
+
+def doc_kind(doc_id: str, text: str, fixture_ids: set[str]) -> str:
+	"""`original` (an imported fixture note), `human` (a daily or afternoon note the simulated
+	person wrote), or `agent` (a note the curate agent created)."""
+	if doc_id in fixture_ids:
+		return "original"
+	title = toml_field(text, "title")
+	if re.match(r"\d{4}-\d{2}-\d{2} daily$", title) or title.startswith("afternoon ") or title == "staged":
+		return "human"
+	return "agent"
+
+
+def generation_dates(log: str) -> dict[int, str]:
+	"""generation number to its simulated date, from the section headers in simulation.log."""
+	return {int(m.group(1)): m.group(2) for m in re.finditer(r"\] generation (\d+): (\d{4}-\d{2}-\d{2})$", log, re.MULTILINE)}
+
+
+def source_texts(gen: int, dates: dict[int, str]) -> tuple[str, str]:
+	"""everything the simulation fed in by the end of `gen`: (daily notes and hand edits, captures)."""
+	human, captured = [], []
+	for g in range(1, gen + 1):
+		date = dates.get(g)
+		if not date:
+			continue
+		human.append(DAILY_NOTES[(g - 1) % len(DAILY_NOTES)].format(date=date))
+		captured.append(CAPTURES[(g - 1) % len(CAPTURES)].format(date=date))
+	return "\n".join(human), "\n".join(captured)
+
+
+def growth_and_deviation(sim: Sim, out: Path, gens: list[int], dates: dict[int, str]) -> tuple[list[dict], str]:
+	"""per generation: how much the knowledge base grew, and how far its facts moved from their sources.
+
+	- retention: facts in the original notes at generation 0 still present in those notes.
+	- unsourced: facts in agent-maintained notes (originals and agent-created notes) whose normalized
+	  text appears in no source: not the original notes, not a daily note, not a capture. these are the
+	  candidates for invented or altered facts and are listed for reading.
+	- capture uptake: facts from the captures fed in so far that appear in an agent-maintained note.
+	"""
+	fixture_ids = set(sim.ids.values())
+	original_text = "\n".join(sim.body(t) for t in sim.baseline.values())
+	escalations = []
+	esc_dir = out / "kb" / ".kb" / "escalations"
+	for path in sorted(esc_dir.glob("*.toml")) if esc_dir.is_dir() else []:
+		text = path.read_text()
+		ts = toml_field(text, "ts")
+		kind = toml_field(text, "kind")
+		escalations.append((ts[:10], kind))
+	commit_dates = subprocess.run(["git", "-C", str(out / "kb"), "log", "--format=%cs", "main"], capture_output=True, text=True, check=False).stdout.split()
+	rows: list[dict] = []
+	unsourced_by_gen: dict[int, list[str]] = {}
+	for gen in gens:
+		texts = {p.stem: p.read_text() for p in sorted((out / f"gen_{gen:02d}").glob("*.md"))}
+		kinds = {doc_id: doc_kind(doc_id, text, fixture_ids) for doc_id, text in texts.items()}
+		bodies = {doc_id: sim.body(text) for doc_id, text in texts.items()}
+		words_by = {k: sum(len(words(bodies[d])) for d in texts if kinds[d] == k) for k in ("original", "human", "agent")}
+		maintained = "\n".join(bodies[d] for d in texts if kinds[d] in ("original", "agent"))
+		human_src, capture_src = source_texts(gen, dates)
+		sources_flat = normalize(original_text + "\n" + human_src + "\n" + capture_src)
+		maintained_facts = facts_in(maintained)
+		unsourced = sorted(f for f in maintained_facts if f not in sources_flat)
+		unsourced_by_gen[gen] = unsourced
+		capture_facts = facts_in(capture_src)
+		uptake = facts_kept(capture_facts, maintained)
+		kept = sum(len(facts_kept(sim.baseline_facts[d], bodies[d])) for d in fixture_ids if d in bodies)
+		baseline_total = sum(len(v) for v in sim.baseline_facts.values())
+		cutoff = (dt.date.fromisoformat(dates[gen]) + dt.timedelta(days=1)).isoformat() if gen in dates else None
+		rows.append(
+			{
+				"gen": gen,
+				"date": dates.get(gen, "setup"),
+				"notes": len(texts),
+				"notes_original": sum(1 for k in kinds.values() if k == "original"),
+				"notes_human": sum(1 for k in kinds.values() if k == "human"),
+				"notes_agent": sum(1 for k in kinds.values() if k == "agent"),
+				"words_total": sum(words_by.values()),
+				"words_original": words_by["original"],
+				"words_human": words_by["human"],
+				"words_agent": words_by["agent"],
+				"commits": sum(1 for d in commit_dates if cutoff is None or d <= cutoff) if cutoff else None,
+				"facts_retained": kept,
+				"facts_original": baseline_total,
+				"facts_in_maintained_notes": len(maintained_facts),
+				"facts_unsourced": len(unsourced),
+				"capture_facts": len(capture_facts),
+				"capture_facts_taken_up": len(uptake),
+				"open_agent_escalations": sum(1 for d, k in escalations if k == "agent" and cutoff and d <= cutoff),
+			}
+		)
+	columns = list(rows[0].keys())
+	with (out / "growth.tsv").open("w") as f:
+		f.write("\t".join(columns) + "\n")
+		for r in rows:
+			f.write("\t".join("" if r[c] is None else str(r[c]) for c in columns) + "\n")
+
+	md = ["", "## growth and factual deviation per generation", ""]
+	md.append("original: the imported notes. human: daily and afternoon notes the simulated person wrote. agent: notes the curate agent created.")
+	md.append("unsourced: facts in original or agent notes whose text appears in no input; read them in the list below.")
+	md.append("")
+	md.append(
+		"| gen | date | notes (orig/human/agent) | words total | words orig / human / agent | growth vs gen 0 | commits | original facts retained | unsourced facts | capture facts taken up | open agent escalations |"
+	)
+	md.append("|---|---|---|---|---|---|---|---|---|---|---|")
+	base_words = rows[0]["words_total"] or 1
+	for r in rows:
+		md.append(
+			f"| {r['gen']} | {r['date']} | {r['notes']} ({r['notes_original']}/{r['notes_human']}/{r['notes_agent']}) | {r['words_total']} | "
+			f"{r['words_original']} / {r['words_human']} / {r['words_agent']} | {100 * (r['words_total'] - base_words) / base_words:+.1f}% | "
+			f"{'' if r['commits'] is None else r['commits']} | {r['facts_retained']}/{r['facts_original']} | {r['facts_unsourced']} | "
+			f"{r['capture_facts_taken_up']}/{r['capture_facts']} | {r['open_agent_escalations']} |"
+		)
+	last = gens[-1]
+	introduced = [f for f in unsourced_by_gen[last] if f not in set(unsourced_by_gen[gens[0]])]
+	md += ["", f"### unsourced facts at generation {last} that were not present at generation 0", ""]
+	md += [f"- `{f}`" for f in introduced] or ["- none"]
+	md.append("")
+	return rows, "\n".join(md) + "\n"
+
+
+def acceptance_section(log: str) -> str:
+	rows = re.findall(r"^(PASS|FAIL)  ([^:]+): (.*)$", log, re.MULTILINE)
+	if not rows:
+		return ""
+	out = ["", "## acceptance checks", "", "| check | result | detail |", "|---|---|---|"]
+	out += [f"| {name} | {result.lower()} | {detail[:160].replace('|', '/')} |" for result, name, detail in rows]
+	return "\n".join(out) + "\n"
+
+
 def analyze(out: Path, kb_bin: Path) -> int:
 	"""rebuild the metrics and report of a finished run from gen_NN/ snapshots and simulation.log."""
 	sim = Sim(kb_bin=kb_bin, out=out, kb=out / "kb", log_path=out / "analyze.log", writer_model="", fast_model="", now=dt.datetime.now(dt.timezone.utc))
@@ -747,8 +879,10 @@ def analyze(out: Path, kb_bin: Path) -> int:
 		measure(sim, gen, texts, rows)
 	write_metrics(out / "metrics.tsv", rows)
 	started = (out / "simulation.log").stat().st_ctime
-	(out / "report.md").write_text(report(sim, rows, gens[-1], started, count_claude_transcripts()))
-	print(f"wrote {out / 'metrics.tsv'} and {out / 'report.md'} for generations 0 to {gens[-1]}")
+	_, growth_md = growth_and_deviation(sim, out, gens, generation_dates(log))
+	text = report(sim, rows, gens[-1], started, count_claude_transcripts()) + growth_md + acceptance_section(log)
+	(out / "report.md").write_text(text)
+	print(f"wrote metrics.tsv, growth.tsv, and report.md in {out} for generations 0 to {gens[-1]}")
 	return 0
 
 
