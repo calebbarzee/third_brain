@@ -218,10 +218,11 @@ fn nightly_reviews_each_merged_commit_once() {
     let cfg = Config::load(root).unwrap();
     kb::index::build(&cfg, None).unwrap();
 
-    maintain::nightly(&cfg, NightlyOpts { dry_run: true, since: None, only: None }).unwrap();
+    maintain::nightly(&cfg, NightlyOpts::default()).unwrap();
 
     let rows = kb::transcript::list(&cfg, &kb::transcript::Filter { role: Some("review".into()), ..Default::default() }).unwrap();
     assert!(!rows.is_empty(), "nightly should have re-reviewed the merged commits");
+    assert!(rows.iter().all(|r| r.run_id.is_some() && r.actor.as_deref().is_some_and(|a| a.starts_with("agent:curate-nightly@"))), "nightly's review calls belong to its run");
     let mut seen = HashSet::new();
     for r in &rows {
         assert!(seen.insert(r.request.to_string()), "a commit was reviewed twice in one pass");

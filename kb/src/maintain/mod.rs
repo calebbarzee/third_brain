@@ -459,19 +459,21 @@ pub fn nightly(cfg: &Config, opts: NightlyOpts) -> Result<NightlyReport> {
         index::build(cfg, None)?;
     }
     let conn = index::open_newest(cfg)?;
-    let all_findings = findings::detect(cfg, &conn, &cfg.root, &since_commit, opts.only)?;
 
     if opts.dry_run {
+        let all_findings = findings::detect(cfg, &conn, &cfg.root, &since_commit, opts.only)?;
         let escalations = all_findings.iter().filter(|f| f.auto_fix.is_none()).map(|f| format!("{}: {}", f.kind, f.detail)).collect();
         return Ok(NightlyReport { findings: all_findings, sessions: vec![], escalations, checkpoint: None });
     }
 
+    // the run exists before detection, so the detectors' review calls belong to it
     let principal = default_principal(cfg);
     let actor_str = format!("agent:curate-nightly@{principal}");
     let mut log = RunLog::create(
         cfg,
         RunStart { actor: actor_str.clone(), principal: Some(principal), skill: Some("curate-nightly".to_string()), ..Default::default() },
     )?;
+    let all_findings = findings::detect(cfg, &conn, &cfg.root, &since_commit, opts.only)?;
 
     let mut sessions = Vec::new();
     let mut escalations = Vec::new();
