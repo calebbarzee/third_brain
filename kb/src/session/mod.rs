@@ -361,15 +361,21 @@ fn split_meta_commit(_cfg: &Config, _session: &Session) -> bool {
 
 /// build the settled commit message per design.md §12.
 fn build_settle_message(cfg: &Config, session: &Session, base: &str, changes: &[DocChange], why: &str, ops: u32) -> String {
-    let objective_chars: Vec<char> = session.objective.replace('\n', " ").chars().collect();
-    let objective = if objective_chars.len() > 72 {
-        let truncated: String = objective_chars[..69].iter().collect();
-        format!("{truncated}...")
+    // a long objective's subject ends on a whole word, and the full objective follows in the
+    // body: a subject cut mid-word reads to a reviewer as an unfinished sentence
+    let full_objective = session.objective.replace('\n', " ");
+    let subject = if full_objective.chars().count() > 72 {
+        let head: String = full_objective.chars().take(72).collect();
+        head.rsplit_once(' ').map_or(head.clone(), |(words, _)| words.trim_end().to_string())
     } else {
-        objective_chars.into_iter().collect()
+        full_objective.clone()
     };
 
-    let mut lines = vec![objective, String::new()];
+    let mut lines = vec![subject.clone(), String::new()];
+    if subject != full_objective {
+        lines.push(format!("objective: {full_objective}"));
+        lines.push(String::new());
+    }
     for c in changes {
         lines.push(format!("{}  {}: {}", c.id, c.title, c.summary));
     }
@@ -648,11 +654,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config::load(dir.path()).unwrap();
         let mut session = session_for_message();
-        session.objective = "x".repeat(100);
+        session.objective = "fold today's captured meeting notes into the existing notes they belong to".to_string();
         let msg = build_settle_message(&cfg, &session, "abc123", &[], "why", 1);
         let first_line = msg.lines().next().unwrap();
         assert!(first_line.chars().count() <= 72, "{} chars", first_line.chars().count());
-        assert!(first_line.ends_with("..."));
+        assert_eq!(first_line, "fold today's captured meeting notes into the existing notes they belong");
+        assert!(msg.contains("objective: fold today's captured meeting notes into the existing notes they belong to"), "{msg}");
     }
 
     #[test]
