@@ -89,7 +89,17 @@ FACT_PATTERNS = [
 	r"(?m)^\s*(?:sudo|nmcli|ping|ssh|git|docker|systemctl|ip) [^\n]+$",  # whole command lines, fenced or not
 ]
 
-GENERIC_PHRASES = ["in summary", "in conclusion", "it is important to note", "overall,", "this document provides", "comprehensive", "robust", "seamless", "leverage"]
+GENERIC_PHRASES = [
+	"in summary",
+	"in conclusion",
+	"it is important to note",
+	"overall,",
+	"this document provides",
+	"comprehensive",
+	"robust",
+	"seamless",
+	"leverage",
+]
 
 
 @dataclass
@@ -135,7 +145,16 @@ class Sim:
 		)
 		return env
 
-	def run(self, args: list[str], *, cwd: Path | None = None, check: bool = False, quiet: bool = False, extra_env: dict[str, str] | None = None, timeout: int = 1800) -> subprocess.CompletedProcess[str]:
+	def run(
+		self,
+		args: list[str],
+		*,
+		cwd: Path | None = None,
+		check: bool = False,
+		quiet: bool = False,
+		extra_env: dict[str, str] | None = None,
+		timeout: int = 1800,
+	) -> subprocess.CompletedProcess[str]:
 		env = self.env()
 		if extra_env:
 			env.update(extra_env)
@@ -244,7 +263,9 @@ class Sim:
 		if not db.exists():
 			return
 		con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-		rows = con.execute("select ts, role, response, error from transcripts where kind = 'llm' and role in ('review') and ts >= ? order by ts", (since,)).fetchall()
+		rows = con.execute(
+			"select ts, role, response, error from transcripts where kind = 'llm' and role in ('review') and ts >= ? order by ts", (since,)
+		).fetchall()
 		con.close()
 		for ts, role, response, error in rows:
 			text = ""
@@ -293,7 +314,9 @@ class Sim:
 			text = self.body(self.doc_path(name).read_text())
 			proposal = f"improve the clarity and organization of document {doc_id}. keep every fact, number, address, and command. current body:\n\n{text}"
 			report = self.kb_json("curate", "propose", "--task", f"refine document {doc_id} for clarity without losing facts", proposal) or {}
-			self.log(f"refine {name}: applied={[(a.get('doc_id'), a.get('after_hash', '')[:8]) for a in report.get('applied', [])]} escalations={report.get('escalations')}")
+			self.log(
+				f"refine {name}: applied={[(a.get('doc_id'), a.get('after_hash', '')[:8]) for a in report.get('applied', [])]} escalations={report.get('escalations')}"
+			)
 			self.land_agent_session(report.get("session_id"), f"refine {name}")
 		self.review_verdicts_since(gen_started)
 
@@ -424,7 +447,24 @@ def measure(sim: Sim, gen: int, texts: dict[str, str], rows: list[dict]) -> None
 	sim.previous = dict(texts)
 
 
-COLUMNS = ["gen", "note", "id", "present", "words", "lexical_diversity", "headings", "sim_gen0", "sim_prev", "facts_gen0", "facts_kept", "facts_now", "repeated_lines", "generic_phrases", "status", "lost_facts"]
+COLUMNS = [
+	"gen",
+	"note",
+	"id",
+	"present",
+	"words",
+	"lexical_diversity",
+	"headings",
+	"sim_gen0",
+	"sim_prev",
+	"facts_gen0",
+	"facts_kept",
+	"facts_now",
+	"repeated_lines",
+	"generic_phrases",
+	"status",
+	"lost_facts",
+]
 
 
 def write_metrics(path: Path, rows: list[dict]) -> None:
@@ -448,7 +488,9 @@ def report(sim: Sim, rows: list[dict], generations: int, started: float, transcr
 		out.append(f"| {k} | {v} |")
 	db = sim.kb / ".kb" / "state.sqlite"
 	con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-	by_role = con.execute("select kind, role, count(*), sum(case when error is null then 0 else 1 end), coalesce(sum(duration_ms), 0) from transcripts group by kind, role order by kind, role").fetchall()
+	by_role = con.execute(
+		"select kind, role, count(*), sum(case when error is null then 0 else 1 end), coalesce(sum(duration_ms), 0) from transcripts group by kind, role order by kind, role"
+	).fetchall()
 	triggers = con.execute("select trigger, count(*) from transcripts group by trigger order by 2 desc").fetchall()
 	unlinked_llm = con.execute("select count(*) from transcripts where kind = 'llm' and run_id is null").fetchone()[0]
 	con.close()
@@ -494,7 +536,9 @@ def report(sim: Sim, rows: list[dict], generations: int, started: float, transcr
 		out.append("| gen | words | diversity | sim gen 0 | sim prev | facts kept | lost |")
 		out.append("|---|---|---|---|---|---|---|")
 		for r in series:
-			out.append(f"| {r['gen']} | {r['words']} | {r['lexical_diversity']} | {r['sim_gen0']} | {r['sim_prev']} | {r['facts_kept']}/{r['facts_gen0']} | {r['lost_facts'] or '-'} |")
+			out.append(
+				f"| {r['gen']} | {r['words']} | {r['lexical_diversity']} | {r['sim_gen0']} | {r['sim_prev']} | {r['facts_kept']}/{r['facts_gen0']} | {r['lost_facts'] or '-'} |"
+			)
 		out.append("")
 	return "\n".join(out) + "\n"
 
@@ -534,13 +578,15 @@ base_url = "http://localhost:11434"
 
 [sources.inbox]
 kind = "files"
-path = "{sim.out / 'inbox'}"
+path = "{sim.out / "inbox"}"
 glob = "**/*"
 """
 	(sim.kb / "kb.toml").write_text(toml)
 	manifest = (sim.kb / "manifest.toml").read_text().replace("min_corpus = 50", "min_corpus = 1")
 	(sim.kb / "manifest.toml").write_text(manifest)
-	(sim.kb / "backup.toml").write_text(f'mirror = "{sim.out / "backup" / "mirror.git"}"\nbundle_dir = "{sim.out / "backup" / "bundles"}"\nstore_copy = "{sim.out / "backup" / "store"}"\n')
+	(sim.kb / "backup.toml").write_text(
+		f'mirror = "{sim.out / "backup" / "mirror.git"}"\nbundle_dir = "{sim.out / "backup" / "bundles"}"\nstore_copy = "{sim.out / "backup" / "store"}"\n'
+	)
 	sim.run(["git", "init", "--bare", "-q", str(sim.out / "backup" / "mirror.git")], cwd=sim.out)
 	sim.git("add", "-A")
 	sim.git("commit", "-m", "configure the simulated knowledge base")
@@ -618,7 +664,9 @@ def main() -> int:
 	parser.add_argument("--start", default="2026-10-05T09:00:00+00:00")
 	parser.add_argument("--writer-model", default="sonnet")
 	parser.add_argument("--fast-model", default="haiku")
-	parser.add_argument("--analyze", action="store_true", help="recompute metrics.tsv and report.md from an existing --out's snapshots and log, calling no model")
+	parser.add_argument(
+		"--analyze", action="store_true", help="recompute metrics.tsv and report.md from an existing --out's snapshots and log, calling no model"
+	)
 	args = parser.parse_args()
 
 	if args.analyze:
@@ -629,7 +677,15 @@ def main() -> int:
 		return 2
 	args.out.mkdir(parents=True)
 	start = dt.datetime.fromisoformat(args.start)
-	sim = Sim(kb_bin=args.kb_bin.resolve(), out=args.out.resolve(), kb=args.out.resolve() / "kb", log_path=args.out.resolve() / "simulation.log", writer_model=args.writer_model, fast_model=args.fast_model, now=start - dt.timedelta(days=1))
+	sim = Sim(
+		kb_bin=args.kb_bin.resolve(),
+		out=args.out.resolve(),
+		kb=args.out.resolve() / "kb",
+		log_path=args.out.resolve() / "simulation.log",
+		writer_model=args.writer_model,
+		fast_model=args.fast_model,
+		now=start - dt.timedelta(days=1),
+	)
 	started = time.time()
 	transcripts_before = count_claude_transcripts()
 
@@ -655,7 +711,11 @@ def main() -> int:
 		(sim.out / "report.md").write_text(report(sim, rows, gen, started, transcripts_before))
 
 	text = report(sim, rows, args.generations, started, transcripts_before)
-	text += "\n## acceptance checks\n\n| check | result | detail |\n|---|---|---|\n" + "\n".join(f"| {n} | {'pass' if ok else 'FAIL'} | {d.replace('|', '/')} |" for n, ok, d in checks) + "\n"
+	text += (
+		"\n## acceptance checks\n\n| check | result | detail |\n|---|---|---|\n"
+		+ "\n".join(f"| {n} | {'pass' if ok else 'FAIL'} | {d.replace('|', '/')} |" for n, ok, d in checks)
+		+ "\n"
+	)
 	(sim.out / "report.md").write_text(text)
 	sim.log("")
 	sim.log(text)

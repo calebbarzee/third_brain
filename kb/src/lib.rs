@@ -26,27 +26,27 @@
 //! - `status`   `kb status`: one screen summarizing repository health.
 //! - `cli`      clap command definitions and handlers.
 
+pub mod answer;
+pub mod backup;
+pub mod check;
+pub mod cli;
+pub mod clock;
+pub mod config;
+pub mod curate;
+pub mod git;
+pub mod import;
+pub mod index;
+pub mod maintain;
+pub mod merge;
 pub mod model;
 pub mod parse;
-pub mod check;
-pub mod index;
-pub mod provider;
-pub mod config;
-pub mod clock;
-pub mod git;
-pub mod session;
-pub mod runlog;
 pub mod policy;
+pub mod provider;
 pub mod review;
-pub mod merge;
-pub mod store;
-pub mod curate;
-pub mod answer;
-pub mod server;
-pub mod maintain;
-pub mod backup;
-pub mod import;
+pub mod runlog;
 pub mod schedule;
+pub mod server;
+pub mod session;
 pub mod status;
+pub mod store;
 pub mod transcript;
-pub mod cli;

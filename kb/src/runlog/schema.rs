@@ -139,44 +139,37 @@ end;
 /// create every table, index, virtual table, and trigger for one run log. call once on a fresh
 /// file, after `journal_mode` and `synchronous` are set.
 pub fn create_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA).context("creating run log schema")
+	conn.execute_batch(SCHEMA).context("creating run log schema")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn schema_creates_and_fts_round_trips() {
-        let conn = Connection::open_in_memory().unwrap();
-        create_schema(&conn).unwrap();
-        conn.execute(
-            "insert into run (run_id, actor, started_at) values ('r1', 'human:x', '2026-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "insert into event (run_id, ts, kind, payload, prev_hash, hash) values ('r1','2026-01-01T00:00:00Z','tool_call','{\"name\":\"read_file\"}','a','b')",
-            [],
-        )
-        .unwrap();
-        let hit: String = conn.query_row("select payload from event_fts where event_fts match 'read_file'", [], |r| r.get(0)).unwrap();
-        assert!(hit.contains("read_file"));
-        let tool_name: String = conn.query_row("select tool_name from event", [], |r| r.get(0)).unwrap();
-        assert_eq!(tool_name, "read_file");
-    }
+	#[test]
+	fn schema_creates_and_fts_round_trips() {
+		let conn = Connection::open_in_memory().unwrap();
+		create_schema(&conn).unwrap();
+		conn.execute("insert into run (run_id, actor, started_at) values ('r1', 'human:x', '2026-01-01T00:00:00Z')", []).unwrap();
+		conn.execute(
+			"insert into event (run_id, ts, kind, payload, prev_hash, hash) values ('r1','2026-01-01T00:00:00Z','tool_call','{\"name\":\"read_file\"}','a','b')",
+			[],
+		)
+		.unwrap();
+		let hit: String = conn.query_row("select payload from event_fts where event_fts match 'read_file'", [], |r| r.get(0)).unwrap();
+		assert!(hit.contains("read_file"));
+		let tool_name: String = conn.query_row("select tool_name from event", [], |r| r.get(0)).unwrap();
+		assert_eq!(tool_name, "read_file");
+	}
 
-    #[test]
-    fn event_table_is_append_only() {
-        let conn = Connection::open_in_memory().unwrap();
-        create_schema(&conn).unwrap();
-        conn.execute("insert into run (run_id, actor, started_at) values ('r1','human:x','2026-01-01T00:00:00Z')", []).unwrap();
-        conn.execute(
-            "insert into event (run_id, ts, kind, payload, prev_hash, hash) values ('r1','2026-01-01T00:00:00Z','decision','{}','a','b')",
-            [],
-        )
-        .unwrap();
-        assert!(conn.execute("update event set payload = '{}' where seq = 1", []).is_err());
-        assert!(conn.execute("delete from event where seq = 1", []).is_err());
-    }
+	#[test]
+	fn event_table_is_append_only() {
+		let conn = Connection::open_in_memory().unwrap();
+		create_schema(&conn).unwrap();
+		conn.execute("insert into run (run_id, actor, started_at) values ('r1','human:x','2026-01-01T00:00:00Z')", []).unwrap();
+		conn.execute("insert into event (run_id, ts, kind, payload, prev_hash, hash) values ('r1','2026-01-01T00:00:00Z','decision','{}','a','b')", [])
+			.unwrap();
+		assert!(conn.execute("update event set payload = '{}' where seq = 1", []).is_err());
+		assert!(conn.execute("delete from event where seq = 1", []).is_err());
+	}
 }

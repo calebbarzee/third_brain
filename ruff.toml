@@ -1,0 +1,5 @@
+# formatting for the python in this repository: tabs for indentation
+line-length = 160
+
+[format]
+indent-style = "tab"

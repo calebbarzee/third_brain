@@ -9,17 +9,17 @@ use crate::store::catalog::Capture;
 use anyhow::Result;
 
 pub fn get(cfg: &Config, id_or_prefix: &str) -> Result<Option<Capture>> {
-    crate::store::catalog::get(cfg, id_or_prefix)
+	crate::store::catalog::get(cfg, id_or_prefix)
 }
 
 pub fn text(cfg: &Config, capture: &Capture) -> Result<String> {
-    crate::store::catalog::text(cfg, capture)
+	crate::store::catalog::text(cfg, capture)
 }
 
 pub fn list(cfg: &Config, status: Option<&str>, source: Option<&str>, limit: usize) -> Result<Vec<Capture>> {
-    crate::store::catalog::list(cfg, status, source, limit)
+	crate::store::catalog::list(cfg, status, source, limit)
 }
 
 pub fn set_status(cfg: &Config, id: &str, status: &str, run_id: Option<&str>) -> Result<()> {
-    crate::store::catalog::set_status(cfg, id, status, run_id)
+	crate::store::catalog::set_status(cfg, id, status, run_id)
 }

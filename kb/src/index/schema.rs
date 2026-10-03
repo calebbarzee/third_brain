@@ -172,29 +172,27 @@ create table meta (
 
 /// create every table, index, virtual table, and trigger for one artifact. call once on a fresh file.
 pub fn create_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA).context("creating index schema")
+	conn.execute_batch(SCHEMA).context("creating index schema")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn schema_creates_and_fts_round_trips() {
-        let conn = Connection::open_in_memory().unwrap();
-        create_schema(&conn).unwrap();
-        conn.execute(
-            "insert into chunks (chunk_hash, doc_id, kind, status, heading_path, ordinal, text, prefix) values ('h1','d1','document','canon','_body',0,'hello world','')",
-            [],
-        )
-        .unwrap();
-        let hit: String = conn
-            .query_row("select text from chunks_fts where chunks_fts match 'hello'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(hit, "hello world");
+	#[test]
+	fn schema_creates_and_fts_round_trips() {
+		let conn = Connection::open_in_memory().unwrap();
+		create_schema(&conn).unwrap();
+		conn.execute(
+			"insert into chunks (chunk_hash, doc_id, kind, status, heading_path, ordinal, text, prefix) values ('h1','d1','document','canon','_body',0,'hello world','')",
+			[],
+		)
+		.unwrap();
+		let hit: String = conn.query_row("select text from chunks_fts where chunks_fts match 'hello'", [], |r| r.get(0)).unwrap();
+		assert_eq!(hit, "hello world");
 
-        conn.execute("delete from chunks where doc_id = 'd1'", []).unwrap();
-        let count: i64 = conn.query_row("select count(*) from chunks_fts where chunks_fts match 'hello'", [], |r| r.get(0)).unwrap();
-        assert_eq!(count, 0);
-    }
+		conn.execute("delete from chunks where doc_id = 'd1'", []).unwrap();
+		let count: i64 = conn.query_row("select count(*) from chunks_fts where chunks_fts match 'hello'", [], |r| r.get(0)).unwrap();
+		assert_eq!(count, 0);
+	}
 }
