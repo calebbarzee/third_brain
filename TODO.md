@@ -1,1 +1,0 @@
-- need to make a more defined flow for project management, tracking, various note consolidation with current project context into more useful documentation

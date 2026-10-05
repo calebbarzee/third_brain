@@ -1,0 +1,4 @@
+# tabs for indentation; width and heuristics match the style the crate was written in
+hard_tabs = true
+max_width = 160
+use_small_heuristics = "Max"
